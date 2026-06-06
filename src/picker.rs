@@ -6,8 +6,10 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// `prompts` を fzf に渡してインタラクティブ選択させ、選択された文字列を返す。
+/// `prompts` を fzf に渡してインタラクティブ選択させ、選択されたオリジナル全文を返す。
 ///
+/// fzf には各プロンプトの先頭行のみを表示候補として渡し、選択後にインデックスで
+/// オリジナル全文を逆引きする（複数行プロンプトが複数候補に分裂するバグを防ぐ）。
 /// ユーザーが Esc 等でキャンセルした場合は None を返す。
 /// fzf が見つからない場合も None を返す（エラーメッセージは stderr に出る）。
 ///
@@ -26,6 +28,10 @@ pub fn pick(prompts: &[String]) -> Option<String> {
             "\t", // フィールド区切りをタブに設定
             "--with-nth",
             "2..", // インデックス列（1列目）を表示から除外
+            "--preview",
+            "echo {2..}", // 選択中の先頭行全文をプレビューパネルに表示
+            "--preview-window",
+            "down:5:wrap",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
