@@ -131,11 +131,12 @@ mod tests {
 
     #[test]
     fn write_and_read_pid_roundtrip() {
-        let path = PathBuf::from(format!("/tmp/guard-test-{}.lock", std::process::id()));
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
         write_pid_to(&path);
         let read = read_pid_from(&path).expect("PID が読めない");
         assert_eq!(read, std::process::id() as libc::pid_t);
-        let _ = std::fs::remove_file(&path);
+        // tmp が Drop するとファイルは自動削除される
     }
 
     #[test]
@@ -146,14 +147,11 @@ mod tests {
 
     #[test]
     fn read_pid_returns_none_for_malformed_content() {
-        let path = PathBuf::from(format!(
-            "/tmp/guard-test-malformed-{}.lock",
-            std::process::id()
-        ));
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "not-a-pid").unwrap();
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "not-a-pid").unwrap();
+        let path = tmp.path().to_path_buf();
         assert!(read_pid_from(&path).is_none());
-        let _ = std::fs::remove_file(&path);
+        // tmp が Drop するとファイルは自動削除される
     }
 
     #[test]
