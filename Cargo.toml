@@ -1,0 +1,22 @@
+[package]
+name = "claude-history-pick"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code プロンプト履歴を fzf で選択して Zed に貼り付けるツール"
+
+[[bin]]
+name = "claude-history-pick"
+path = "src/main.rs"
+
+[dependencies]
+# ~/.claude/history.jsonl の JSON パース（jq の代替）
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# double-fork / setsid（python3 の代替）
+libc = "0.2"
+
+[profile.release]
+# バイナリサイズ最小化
+strip = true
+opt-level = "z"
