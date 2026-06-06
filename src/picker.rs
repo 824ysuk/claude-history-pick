@@ -18,14 +18,14 @@ pub fn pick(prompts: &[String]) -> Option<String> {
     let mut child = Command::new("fzf")
         .args([
             "--height",
-            "100%",       // ターミナル全体を使う
-            "--reverse",  // 候補を上から下に表示（プロンプトが上）
+            "100%",      // ターミナル全体を使う
+            "--reverse", // 候補を上から下に表示（プロンプトが上）
             "--prompt",
             "Claude History > ",
             "--delimiter",
-            "\t",         // フィールド区切りをタブに設定
+            "\t", // フィールド区切りをタブに設定
             "--with-nth",
-            "2..",        // インデックス列（1列目）を表示から除外
+            "2..", // インデックス列（1列目）を表示から除外
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -66,11 +66,7 @@ pub fn pick(prompts: &[String]) -> Option<String> {
 /// 複数行プロンプトは先頭行のみを返す。タブ文字はフィールド区切りと
 /// 衝突するためスペースに置換する。
 fn display_line(prompt: &str) -> String {
-    prompt
-        .lines()
-        .next()
-        .unwrap_or("")
-        .replace('\t', " ")
+    prompt.lines().next().unwrap_or("").replace('\t', " ")
 }
 
 #[cfg(test)]
