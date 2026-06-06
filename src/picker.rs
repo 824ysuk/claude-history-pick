@@ -13,9 +13,11 @@ use std::process::{Command, Stdio};
 pub fn pick(prompts: &[String]) -> Option<String> {
     let mut child = Command::new("fzf")
         .args([
-            "--height", "100%",   // ターミナル全体を使う
-            "--reverse",          // 候補を上から下に表示（プロンプトが上）
-            "--prompt", "Claude History > ",
+            "--height",
+            "100%",      // ターミナル全体を使う
+            "--reverse", // 候補を上から下に表示（プロンプトが上）
+            "--prompt",
+            "Claude History > ",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -39,7 +41,11 @@ pub fn pick(prompts: &[String]) -> Option<String> {
     if output.status.success() {
         let selected = String::from_utf8(output.stdout).ok()?;
         let trimmed = selected.trim().to_string();
-        if trimmed.is_empty() { None } else { Some(trimmed) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None

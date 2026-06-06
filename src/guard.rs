@@ -79,10 +79,7 @@ fn is_our_process(pid: libc::pid_t) -> bool {
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
         .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .contains("claude-history-pick")
-        })
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("claude-history-pick"))
         .unwrap_or(false)
 }
 
@@ -149,7 +146,10 @@ mod tests {
 
     #[test]
     fn read_pid_returns_none_for_malformed_content() {
-        let path = PathBuf::from(format!("/tmp/guard-test-malformed-{}.lock", std::process::id()));
+        let path = PathBuf::from(format!(
+            "/tmp/guard-test-malformed-{}.lock",
+            std::process::id()
+        ));
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(f, "not-a-pid").unwrap();
         assert!(read_pid_from(&path).is_none());
@@ -161,7 +161,10 @@ mod tests {
         // cargo test のバイナリは claude-history-pick 本体なので true になる。
         // これは ps -o comm= が argv[0] フルパスを返すことの確認でもある。
         let my_pid = std::process::id() as libc::pid_t;
-        assert!(is_our_process_pub(my_pid), "テストバイナリ自体が claude-history-pick のはず");
+        assert!(
+            is_our_process_pub(my_pid),
+            "テストバイナリ自体が claude-history-pick のはず"
+        );
     }
 
     #[test]
