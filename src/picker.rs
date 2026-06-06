@@ -36,10 +36,10 @@ pub fn pick(prompts: &[String]) -> Option<String> {
         // stdin を drop することで fzf 側の EOF が発生し、候補リストが確定する
     }
 
-    let output = child.wait_with_output().ok()?;
+    let fzf_output = child.wait_with_output().ok()?;
 
-    if output.status.success() {
-        let selected = String::from_utf8(output.stdout).ok()?;
+    if fzf_output.status.success() {
+        let selected = String::from_utf8(fzf_output.stdout).ok()?;
         let trimmed = selected.trim().to_string();
         if trimmed.is_empty() {
             None
