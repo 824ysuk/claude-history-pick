@@ -59,6 +59,41 @@ ln -sf "$PWD/target/release/claude-history-pick" ~/.local/bin/claude-history-pic
 CLAUDE_HISTORY_PATH=/path/to/history.jsonl claude-history-pick
 ```
 
+## Zed 設定
+
+### tasks.json
+
+`~/.config/zed/tasks.json` にタスクを追加する。
+
+```json
+[
+  {
+    "label": "Claude History Search",
+    "command": "~/.local/bin/claude-history-pick",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "hide": "on_success"
+  }
+]
+```
+
+### keymap.json
+
+`~/.config/zed/keymap.json` の `Terminal` コンテキストに2つのバインディングを追加する。
+
+```json
+{
+  "context": "Terminal",
+  "bindings": {
+    "ctrl-; r": ["task::Spawn", { "task_name": "Claude History Search" }],
+    "cmd-r": "terminal::Paste"
+  }
+}
+```
+
+- `ctrl-; r` — fzf を起動してプロンプトを選択
+- `cmd-r` — 選択後に osascript が自動送信するキー。`terminal::Paste` でクリップボード内容を入力欄に貼り付ける
+
 ## macOS Accessibility 権限
 
 初回起動時に osascript のキーストローク注入に Accessibility 権限が必要。
