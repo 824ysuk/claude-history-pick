@@ -53,7 +53,10 @@ fn main() {
         Ok(p) => p,
         Err(e) => {
             if from_env_var {
-                eprintln!("CLAUDE_HISTORY_PATH で指定したパスが見つかりません: {}", history_path.display());
+                eprintln!(
+                    "CLAUDE_HISTORY_PATH で指定したパスが見つかりません: {}",
+                    history_path.display()
+                );
                 eprintln!("エラー: {e}");
             } else {
                 eprintln!("history.jsonl の読み込みに失敗: {e}");
