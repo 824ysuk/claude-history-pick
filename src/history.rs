@@ -149,6 +149,7 @@ mod tests {
 {"display":"line1\nline2"}
 {"display":"line1\nline3"}"#;
         let result = collect_prompts(lines(input));
-        assert_eq!(result, vec!["line1\nline2", "line1\nline3"]);
+        // collect_prompts は最新優先で返すため、ファイル末尾（line3）が先頭に来る
+        assert_eq!(result, vec!["line1\nline3", "line1\nline2"]);
     }
 }
