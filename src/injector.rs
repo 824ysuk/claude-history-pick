@@ -120,12 +120,20 @@ mod tests {
         let has_notification = args
             .iter()
             .any(|s| s.contains("display notification") && s.contains("claude-history-pick ⚠"));
-        assert!(has_notification, "フォールバック通知行が見つからない: {args:?}");
+        assert!(
+            has_notification,
+            "フォールバック通知行が見つからない: {args:?}"
+        );
     }
 
     #[test]
     fn script_args_count_is_21() {
         let args = build_script_args(Duration::from_millis(500));
-        assert_eq!(args.len(), 21, "スクリプト行数が想定と異なる: {}", args.len());
+        assert_eq!(
+            args.len(),
+            21,
+            "スクリプト行数が想定と異なる: {}",
+            args.len()
+        );
     }
 }
