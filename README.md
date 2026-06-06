@@ -5,13 +5,13 @@
 ## 動作フロー
 
 ```
-ctrl-shift-r
+ctrl-; r
   → Zed タスク起動（tasks.json）
   → fzf で履歴を表示・選択
   → クリップボードにコピー（pbcopy）
-  → double-fork でデーモン化
-  → 0.3s 後に osascript で cmd-r を送信
-  → terminal::Paste でクリップボードの内容を貼り付け
+  → setsid で独立プロセス（osascript）を起動
+  → Zed がフォーカスを取り戻すまでポーリング（最大 2 秒）
+  → cmd-r を送信 → terminal::Paste でクリップボードの内容を貼り付け
 ```
 
 ## モジュール構成
@@ -22,7 +22,8 @@ src/
 ├── history.rs    — ~/.claude/history.jsonl のパース（serde_json）
 ├── picker.rs     — fzf 起動・選択結果取得
 ├── clipboard.rs  — pbcopy でクリップボードにコピー
-└── injector.rs   — double-fork + osascript でキーストローク注入
+├── guard.rs      — PID ロックファイルによる単一インスタンス保証
+└── injector.rs   — setsid + osascript でキーストローク注入
 ```
 
 ## 依存
