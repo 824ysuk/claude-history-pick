@@ -133,4 +133,22 @@ mod tests {
         let result = collect_prompts(lines(""));
         assert!(result.is_empty());
     }
+
+    #[test]
+    fn multiline_display_is_preserved_as_full_text() {
+        // JSON の \n はパース後に実際の改行文字になる。
+        // history 層はそのまま保持し、正規化は picker 層に委ねる。
+        let input = r#"{"display":"line1\nline2"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["line1\nline2"]);
+    }
+
+    #[test]
+    fn multiline_duplicate_dedup_uses_full_text() {
+        let input = r#"{"display":"line1\nline2"}
+{"display":"line1\nline2"}
+{"display":"line1\nline3"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["line1\nline2", "line1\nline3"]);
+    }
 }
