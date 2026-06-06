@@ -33,11 +33,11 @@ const PASTE_DELAY: Duration = Duration::from_millis(100);
 fn main() {
     guard::acquire();
 
-    let history_path = {
+    let history_path = if let Ok(p) = std::env::var("CLAUDE_HISTORY_PATH") {
+        PathBuf::from(p)
+    } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let mut path = PathBuf::from(home);
-        path.push(".claude/history.jsonl");
-        path
+        PathBuf::from(home).join(".claude/history.jsonl")
     };
 
     let prompts = match history::load_prompts(&history_path) {
