@@ -7,7 +7,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::Path;
 
 /// history.jsonl の 1 行に対応する構造体。
 /// `display` フィールドだけ取り出し、他フィールドは無視する。
@@ -24,14 +24,19 @@ struct HistoryEntry {
 /// - 重複エントリは先出順で除去（awk '!seen[$0]++' の Rust 等価）
 ///
 /// パース失敗行はスキップし、ファイル全体の読み込みは続行する。
-pub fn load_prompts(history_path: &PathBuf) -> std::io::Result<Vec<String>> {
+pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<String>> {
     let file = File::open(history_path)?;
     let reader = BufReader::new(file);
-    collect_prompts(reader.lines().map(|l| l.unwrap_or_default()))
+    Ok(collect_prompts(
+        reader.lines().map(|l| l.unwrap_or_default()),
+    ))
 }
 
 /// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
-pub fn collect_prompts(lines: impl Iterator<Item = String>) -> std::io::Result<Vec<String>> {
+///
+/// 行単位のパース失敗はスキップして続行する。ファイル I/O を伴わないため
+/// 失敗しない。返り値を Result にしないことでその事実を型で表現する。
+pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
     let mut prompts = Vec::new();
     let mut seen = HashSet::new();
 
@@ -56,7 +61,7 @@ pub fn collect_prompts(lines: impl Iterator<Item = String>) -> std::io::Result<V
         }
     }
 
-    Ok(prompts)
+    prompts
 }
 
 #[cfg(test)]
@@ -70,7 +75,7 @@ mod tests {
     #[test]
     fn normal_entry_is_included() {
         let input = r#"{"display":"ビルドして"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["ビルドして"]);
     }
 
@@ -78,7 +83,7 @@ mod tests {
     fn slash_command_is_excluded() {
         let input = r#"{"display":"/help"}
 {"display":"通常のプロンプト"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["通常のプロンプト"]);
     }
 
@@ -87,7 +92,7 @@ mod tests {
         let input = r#"{"display":"重複テスト"}
 {"display":"重複テスト"}
 {"display":"別のプロンプト"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["重複テスト", "別のプロンプト"]);
     }
 
@@ -95,7 +100,7 @@ mod tests {
     fn empty_display_is_excluded() {
         let input = r#"{"display":""}
 {"display":"有効なプロンプト"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["有効なプロンプト"]);
     }
 
@@ -103,7 +108,7 @@ mod tests {
     fn missing_display_field_is_skipped() {
         let input = r#"{"other_field":"value"}
 {"display":"有効"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["有効"]);
     }
 
@@ -111,20 +116,20 @@ mod tests {
     fn invalid_json_line_is_skipped() {
         let input = r#"not-json
 {"display":"有効"}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["有効"]);
     }
 
     #[test]
     fn whitespace_is_trimmed() {
         let input = r#"{"display":"  前後スペース  "}"#;
-        let result = collect_prompts(lines(input)).unwrap();
+        let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["前後スペース"]);
     }
 
     #[test]
     fn empty_input_returns_empty_vec() {
-        let result = collect_prompts(lines("")).unwrap();
+        let result = collect_prompts(lines(""));
         assert!(result.is_empty());
     }
 }

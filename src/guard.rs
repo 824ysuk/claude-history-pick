@@ -24,7 +24,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::{getuid, Pid};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn lock_path() -> PathBuf {
@@ -56,14 +56,14 @@ pub fn release() {
     let _ = fs::remove_file(lock_path());
 }
 
-fn read_pid(path: &PathBuf) -> Option<libc::pid_t> {
+fn read_pid(path: &Path) -> Option<libc::pid_t> {
     let mut file = fs::File::open(path).ok()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
     buf.trim().parse().ok()
 }
 
-fn write_pid(path: &PathBuf) {
+fn write_pid(path: &Path) {
     if let Ok(mut file) = fs::File::create(path) {
         let _ = writeln!(file, "{}", std::process::id());
     }
@@ -85,12 +85,12 @@ fn is_our_process(pid: libc::pid_t) -> bool {
 
 /// テスト用: 任意パスへの read_pid / write_pid を公開する。
 #[cfg(test)]
-pub fn read_pid_from(path: &PathBuf) -> Option<libc::pid_t> {
+pub fn read_pid_from(path: &Path) -> Option<libc::pid_t> {
     read_pid(path)
 }
 
 #[cfg(test)]
-pub fn write_pid_to(path: &PathBuf) {
+pub fn write_pid_to(path: &Path) {
     write_pid(path)
 }
 
@@ -132,9 +132,8 @@ mod tests {
     #[test]
     fn write_and_read_pid_roundtrip() {
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        write_pid_to(&path);
-        let read = read_pid_from(&path).expect("PID が読めない");
+        write_pid_to(tmp.path());
+        let read = read_pid_from(tmp.path()).expect("PID が読めない");
         assert_eq!(read, std::process::id() as libc::pid_t);
         // tmp が Drop するとファイルは自動削除される
     }
@@ -149,8 +148,7 @@ mod tests {
     fn read_pid_returns_none_for_malformed_content() {
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         writeln!(tmp, "not-a-pid").unwrap();
-        let path = tmp.path().to_path_buf();
-        assert!(read_pid_from(&path).is_none());
+        assert!(read_pid_from(tmp.path()).is_none());
         // tmp が Drop するとファイルは自動削除される
     }
 
