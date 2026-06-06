@@ -168,4 +168,34 @@ mod tests {
         // 存在しない PID（大きな値）は false
         assert!(!is_our_process_pub(999_999));
     }
+
+    // acquire/release は実際のロックファイルを操作するため直列化する。
+    // 並列実行すると acquire が相手の lock を evict してしまう。
+    static LOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn acquire_writes_current_pid() {
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+        let _ = std::fs::remove_file(&path); // 残留ロックを除去してクリーンな状態にする
+
+        acquire();
+
+        let pid = read_pid_from(&path).expect("acquire がロックファイルを作成していない");
+        assert_eq!(pid, std::process::id() as libc::pid_t);
+
+        let _ = std::fs::remove_file(&path); // 後始末
+    }
+
+    #[test]
+    fn release_removes_lock_file() {
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+
+        acquire();
+        assert!(path.exists(), "前提: acquire 後にロックファイルが存在する");
+
+        release();
+        assert!(!path.exists(), "release 後にロックファイルが残っている");
+    }
 }

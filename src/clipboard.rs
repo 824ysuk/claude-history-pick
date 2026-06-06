@@ -21,3 +21,38 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
     child.wait()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // pbcopy/pbpaste はシステムクリップボードを直接操作するため、
+    // 並列実行すると相互に上書きして誤検知が起きる。
+    static CLIPBOARD_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn pbpaste() -> String {
+        let out = Command::new("pbpaste").output().expect("pbpaste failed");
+        String::from_utf8(out.stdout).unwrap_or_default()
+    }
+
+    #[test]
+    fn copy_to_clipboard_writes_text() {
+        let _guard = CLIPBOARD_MUTEX.lock().unwrap();
+        copy_to_clipboard("claude-history-pick test").expect("pbcopy failed");
+        assert_eq!(pbpaste(), "claude-history-pick test");
+    }
+
+    #[test]
+    fn copy_to_clipboard_preserves_unicode() {
+        let _guard = CLIPBOARD_MUTEX.lock().unwrap();
+        copy_to_clipboard("テスト 🦀").expect("pbcopy failed");
+        assert_eq!(pbpaste(), "テスト 🦀");
+    }
+
+    #[test]
+    fn copy_to_clipboard_preserves_newlines() {
+        let _guard = CLIPBOARD_MUTEX.lock().unwrap();
+        copy_to_clipboard("line1\nline2").expect("pbcopy failed");
+        assert_eq!(pbpaste(), "line1\nline2");
+    }
+}
