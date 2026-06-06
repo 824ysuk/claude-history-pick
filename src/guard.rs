@@ -69,17 +69,26 @@ fn write_pid(path: &Path) {
     }
 }
 
-/// PID が claude-history-pick プロセスかを確認する（PID 再利用対策）。
+/// PID が自バイナリと同一の実行ファイルかを確認する（PID 再利用対策）。
 ///
 /// macOS では process name (comm) が 15 文字に切り詰められるため
 /// `pgrep -x claude-history-pick`（19 文字）は常に空を返す。
 /// `ps -o comm=` は argv[0]（フルパス）を返すため切り詰めが起きない。
+///
+/// `current_exe()` との完全一致で判定するため、バイナリを別名でコピーしても
+/// 誤 kill しない。hardcoded 文字列への依存も排除する。
 fn is_our_process(pid: libc::pid_t) -> bool {
+    let Ok(our_exe) = std::env::current_exe() else {
+        return false;
+    };
     std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
         .ok()
-        .map(|out| String::from_utf8_lossy(&out.stdout).contains("claude-history-pick"))
+        .map(|out| {
+            let comm = String::from_utf8_lossy(&out.stdout);
+            comm.trim() == our_exe.to_string_lossy().as_ref()
+        })
         .unwrap_or(false)
 }
 
@@ -153,14 +162,29 @@ mod tests {
     }
 
     #[test]
-    fn is_our_process_recognizes_self() {
-        // cargo test のバイナリは claude-history-pick 本体なので true になる。
-        // これは ps -o comm= が argv[0] フルパスを返すことの確認でもある。
+    fn ps_comm_matches_current_exe() {
+        // is_our_process の動作基盤となる前提を直接検証する:
+        // ps -o comm= は current_exe() と同じフルパスを返す。
         let my_pid = std::process::id() as libc::pid_t;
-        assert!(
-            is_our_process_pub(my_pid),
-            "テストバイナリ自体が claude-history-pick のはず"
+        let exe = std::env::current_exe().unwrap();
+        let output = std::process::Command::new("ps")
+            .args(["-p", &my_pid.to_string(), "-o", "comm="])
+            .output()
+            .unwrap();
+        let comm = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            comm.trim(),
+            exe.to_string_lossy().as_ref(),
+            "ps -o comm= は argv[0] フルパスを返すはず"
         );
+    }
+
+    #[test]
+    fn is_our_process_recognizes_self() {
+        // current_exe() との完全一致で判定するため、
+        // ディレクトリ名や binary 名に依存せず自プロセスを識別できる。
+        let my_pid = std::process::id() as libc::pid_t;
+        assert!(is_our_process_pub(my_pid), "自プロセスを識別できるはず");
     }
 
     #[test]
