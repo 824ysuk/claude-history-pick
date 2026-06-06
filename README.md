@@ -38,14 +38,14 @@ src/
 ## セットアップ
 
 ```bash
-# ビルド
-cd ~/dotfiles/zed/claude-history-pick
+# クローン & ビルド
+git clone https://github.com/824ysuk/claude-history-pick
+cd claude-history-pick
 cargo build --release
 
 # ~/.local/bin に配置
 mkdir -p ~/.local/bin
-ln -sf ~/dotfiles/zed/claude-history-pick/target/release/claude-history-pick \
-       ~/.local/bin/claude-history-pick
+ln -sf "$PWD/target/release/claude-history-pick" ~/.local/bin/claude-history-pick
 ```
 
 ## macOS Accessibility 権限
