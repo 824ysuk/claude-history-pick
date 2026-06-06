@@ -48,6 +48,17 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/target/release/claude-history-pick" ~/.local/bin/claude-history-pick
 ```
 
+## 環境変数
+
+| 変数 | デフォルト | 説明 |
+|---|---|---|
+| `CLAUDE_HISTORY_PATH` | `~/.claude/history.jsonl` | 履歴ファイルのパス |
+
+```bash
+# 例: 別パスを使う
+CLAUDE_HISTORY_PATH=/path/to/history.jsonl claude-history-pick
+```
+
 ## macOS Accessibility 権限
 
 初回起動時に osascript のキーストローク注入に Accessibility 権限が必要。

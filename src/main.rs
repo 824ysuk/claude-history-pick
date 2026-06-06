@@ -30,21 +30,38 @@ use std::time::Duration;
 /// 固定値への依存は排除されている。
 const PASTE_DELAY: Duration = Duration::from_millis(100);
 
+/// 履歴ファイルのパスを解決する。
+///
+/// `CLAUDE_HISTORY_PATH` 環境変数が設定されていればそのパスを使う。
+/// 未設定なら `$HOME/.claude/history.jsonl` を返す。
+/// 戻り値の `bool` は環境変数から取得した場合 `true`（エラーメッセージの出し分けに使う）。
+fn resolve_history_path() -> (PathBuf, bool) {
+    if let Ok(p) = std::env::var("CLAUDE_HISTORY_PATH") {
+        (PathBuf::from(p), true)
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        (PathBuf::from(home).join(".claude/history.jsonl"), false)
+    }
+}
+
 fn main() {
     guard::acquire();
 
-    let history_path = {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let mut path = PathBuf::from(home);
-        path.push(".claude/history.jsonl");
-        path
-    };
+    let (history_path, from_env_var) = resolve_history_path();
 
     let prompts = match history::load_prompts(&history_path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("history.jsonl の読み込みに失敗: {e}");
-            eprintln!("パス: {}", history_path.display());
+            if from_env_var {
+                eprintln!(
+                    "CLAUDE_HISTORY_PATH で指定したパスが見つかりません: {}",
+                    history_path.display()
+                );
+                eprintln!("エラー: {e}");
+            } else {
+                eprintln!("history.jsonl の読み込みに失敗: {e}");
+                eprintln!("パス: {}", history_path.display());
+            }
             guard::release();
             std::process::exit(1);
         }
@@ -74,4 +91,66 @@ fn main() {
     // daemon は main process 終了後も動くが、次の ctrl-; r を妨げない。
     guard::release();
     injector::inject_keystroke_after_delay(PASTE_DELAY);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 環境変数はプロセス全体に影響するため、並列テストが互いを汚染しないよう直列化する。
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn env_var_set_returns_custom_path_and_true() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("CLAUDE_HISTORY_PATH", "/custom/path/history.jsonl");
+        let (path, from_env_var) = resolve_history_path();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        assert_eq!(path, PathBuf::from("/custom/path/history.jsonl"));
+        assert!(from_env_var);
+    }
+
+    #[test]
+    fn env_var_unset_returns_default_path_and_false() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        let (path, from_env_var) = resolve_history_path();
+        assert!(path.to_string_lossy().ends_with(".claude/history.jsonl"));
+        assert!(!from_env_var);
+    }
+
+    #[test]
+    fn default_path_is_under_home() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let (path, _) = resolve_history_path();
+        assert_eq!(path, PathBuf::from(&home).join(".claude/history.jsonl"));
+    }
+
+    #[test]
+    fn home_unset_falls_back_to_dot() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        let original_home = std::env::var("HOME").ok();
+        std::env::remove_var("HOME");
+        let (path, from_env_var) = resolve_history_path();
+        // HOME を元に戻す
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        assert_eq!(path, PathBuf::from("./.claude/history.jsonl"));
+        assert!(!from_env_var);
+    }
+
+    #[test]
+    fn env_var_empty_string_is_accepted_as_env_var_path() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("CLAUDE_HISTORY_PATH", "");
+        let (path, from_env_var) = resolve_history_path();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        assert_eq!(path, PathBuf::from(""));
+        assert!(from_env_var);
+    }
 }
