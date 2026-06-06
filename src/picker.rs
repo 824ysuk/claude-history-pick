@@ -10,14 +10,22 @@ use std::process::{Command, Stdio};
 ///
 /// ユーザーが Esc 等でキャンセルした場合は None を返す。
 /// fzf が見つからない場合も None を返す（エラーメッセージは stderr に出る）。
+///
+/// 複数行プロンプトは先頭行のみを fzf に表示し、選択後にオリジナル全文を返す。
+/// インデックスをタブ区切りで付与して fzf 出力から逆引きするため、
+/// 先頭行が重複するプロンプトが存在しても正しいエントリを返せる。
 pub fn pick(prompts: &[String]) -> Option<String> {
     let mut child = Command::new("fzf")
         .args([
             "--height",
-            "100%",      // ターミナル全体を使う
-            "--reverse", // 候補を上から下に表示（プロンプトが上）
+            "100%",       // ターミナル全体を使う
+            "--reverse",  // 候補を上から下に表示（プロンプトが上）
             "--prompt",
             "Claude History > ",
+            "--delimiter",
+            "\t",         // フィールド区切りをタブに設定
+            "--with-nth",
+            "2..",        // インデックス列（1列目）を表示から除外
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -28,10 +36,10 @@ pub fn pick(prompts: &[String]) -> Option<String> {
         })
         .ok()?;
 
-    // stdin に候補を 1 行ずつ書き込む（take で所有権を得て drop で close）
+    // stdin に "{index}\t{display_line}" を 1 行ずつ書き込む
     if let Some(mut stdin) = child.stdin.take() {
-        for prompt in prompts {
-            let _ = writeln!(stdin, "{}", prompt);
+        for (i, prompt) in prompts.iter().enumerate() {
+            let _ = writeln!(stdin, "{}\t{}", i, display_line(prompt));
         }
         // stdin を drop することで fzf 側の EOF が発生し、候補リストが確定する
     }
@@ -40,14 +48,57 @@ pub fn pick(prompts: &[String]) -> Option<String> {
 
     if fzf_output.status.success() {
         let selected = String::from_utf8(fzf_output.stdout).ok()?;
-        let trimmed = selected.trim().to_string();
+        let trimmed = selected.trim();
         if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed)
+            return None;
         }
+        // fzf は --with-nth でも行全体を返すため "{index}\t{display}" をパース
+        let idx: usize = trimmed.split('\t').next()?.parse().ok()?;
+        prompts.get(idx).cloned()
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None
+    }
+}
+
+/// fzf 表示用に 1 行へ正規化する。
+///
+/// 複数行プロンプトは先頭行のみを返す。タブ文字はフィールド区切りと
+/// 衝突するためスペースに置換する。
+fn display_line(prompt: &str) -> String {
+    prompt
+        .lines()
+        .next()
+        .unwrap_or("")
+        .replace('\t', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_line_single_line() {
+        assert_eq!(display_line("hello world"), "hello world");
+    }
+
+    #[test]
+    fn display_line_multiline_returns_first() {
+        assert_eq!(display_line("first\nsecond\nthird"), "first");
+    }
+
+    #[test]
+    fn display_line_replaces_tabs() {
+        assert_eq!(display_line("tab\there"), "tab here");
+    }
+
+    #[test]
+    fn display_line_empty_string() {
+        assert_eq!(display_line(""), "");
+    }
+
+    #[test]
+    fn display_line_only_newline() {
+        assert_eq!(display_line("\n"), "");
     }
 }
