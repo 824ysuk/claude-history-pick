@@ -31,42 +31,45 @@ use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
+///
+/// 各要素が `osascript -e <element>` の 1 行に対応する。
+fn build_script_args(initial_delay: Duration) -> Vec<String> {
+    let delay_secs = initial_delay.as_secs_f64();
+    vec![
+        format!("delay {delay_secs:.3}"),
+        "tell application \"Zed\" to activate".to_string(),
+        // Zed が実際に前面に来るまでポーリング（最大 2 秒 = 0.05s × 40）
+        "set maxAttempts to 40".to_string(),
+        "set gotFocus to false".to_string(),
+        "repeat maxAttempts times".to_string(),
+        "delay 0.05".to_string(),
+        "tell application \"System Events\"".to_string(),
+        "if (name of first process whose frontmost is true) is \"Zed\" then".to_string(),
+        "set gotFocus to true".to_string(),
+        "exit repeat".to_string(),
+        "end if".to_string(),
+        "end tell".to_string(),
+        "end repeat".to_string(),
+        "if gotFocus then".to_string(),
+        "delay 0.3".to_string(),
+        "tell application \"System Events\"".to_string(),
+        "keystroke \"r\" using command down".to_string(),
+        "end tell".to_string(),
+        "else".to_string(),
+        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"claude-history-pick ⚠\"".to_string(),
+        "end if".to_string(),
+    ]
+}
+
 /// osascript を新しいセッションで起動し、Zed がフォーカスを取り戻した後に cmd-r を送る。
 ///
 /// `initial_delay` はタスクターミナルが閉じ始めるのを待つ最小時間。
 /// その後 AppleScript のポーリングで Zed が前面になるまで待機するため、
 /// 固定 sleep によるレースコンディションが発生しない。
 pub fn inject_keystroke_after_delay(initial_delay: Duration) {
-    let delay_secs = initial_delay.as_secs_f64();
-    let delay_line = format!("delay {delay_secs:.3}");
-
-    let script_lines: &[&str] = &[
-        delay_line.as_str(),
-        "tell application \"Zed\" to activate",
-        // Zed が実際に前面に来るまでポーリング（最大 2 秒 = 0.05s × 40）
-        "set maxAttempts to 40",
-        "set gotFocus to false",
-        "repeat maxAttempts times",
-        "delay 0.05",
-        "tell application \"System Events\"",
-        "if (name of first process whose frontmost is true) is \"Zed\" then",
-        "set gotFocus to true",
-        "exit repeat",
-        "end if",
-        "end tell",
-        "end repeat",
-        "if gotFocus then",
-        "delay 0.3",
-        "tell application \"System Events\"",
-        "keystroke \"r\" using command down",
-        "end tell",
-        "else",
-        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"claude-history-pick ⚠\"",
-        "end if",
-    ];
-
     let mut cmd = Command::new("osascript");
-    for line in script_lines {
+    for line in build_script_args(initial_delay) {
         cmd.arg("-e").arg(line);
     }
     cmd.stdin(Stdio::null())
@@ -84,4 +87,45 @@ pub fn inject_keystroke_after_delay(initial_delay: Duration) {
     }
 
     cmd.spawn().ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delay_value_is_embedded_correctly() {
+        let args = build_script_args(Duration::from_millis(100));
+        assert_eq!(args[0], "delay 0.100");
+    }
+
+    #[test]
+    fn delay_zero_is_formatted() {
+        let args = build_script_args(Duration::ZERO);
+        assert_eq!(args[0], "delay 0.000");
+    }
+
+    #[test]
+    fn max_attempts_is_40() {
+        let args = build_script_args(Duration::from_millis(500));
+        assert!(
+            args.iter().any(|s| s == "set maxAttempts to 40"),
+            "maxAttempts 行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn fallback_notification_text_is_present() {
+        let args = build_script_args(Duration::from_millis(500));
+        let has_notification = args
+            .iter()
+            .any(|s| s.contains("display notification") && s.contains("claude-history-pick ⚠"));
+        assert!(has_notification, "フォールバック通知行が見つからない: {args:?}");
+    }
+
+    #[test]
+    fn script_args_count_is_21() {
+        let args = build_script_args(Duration::from_millis(500));
+        assert_eq!(args.len(), 21, "スクリプト行数が想定と異なる: {}", args.len());
+    }
 }
