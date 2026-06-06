@@ -1,0 +1,45 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: macos-15-large
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+
+      - name: build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: package
+        run: |
+          ASSET="claude-history-pick-${{ matrix.target }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" claude-history-pick
+          shasum -a 256 "$ASSET" > "${ASSET}.sha256"
+
+      - name: upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            claude-history-pick-${{ matrix.target }}.tar.gz
+            claude-history-pick-${{ matrix.target }}.tar.gz.sha256
