@@ -1,103 +1,88 @@
-//! Zed へのキーストローク注入層（double-fork + osascript）。
+//! Zed へのキーストローク注入層（setsid + osascript）。
 //!
 //! 責務: Zed のプロセスグループから切り離され、タスクターミナル終了後に
-//! cmd-r（terminal::Paste）を発火させる孤立プロセスの生成のみ。
+//! cmd-r（terminal::Paste）を発火させる独立プロセスの生成のみ。
 //! クリップボードや履歴パースは扱わない。
 //!
-//! ## なぜ double-fork が必要か
+//! ## なぜ setsid が必要か
 //!
 //! Zed は `hide: on_success` でタスクターミナルタブを閉じるとき、
 //! そのターミナルが属するプロセスグループ全体に SIGTERM を送る。
 //!
-//! `os.setsid()` だけでは「新しいセッションを作るが、自プロセスは
-//! 新セッションのプロセスグループリーダー」になるため、Zed が
-//! グループリーダーを kill する設計だと依然として届く場合がある。
+//! Command::pre_exec で setsid() を呼ぶことで osascript を新しいセッションに移動させ、
+//! Zed の SIGTERM から切り離す。double-fork より実装がシンプルで、
+//! std の安全なラッパーを使うため exec 失敗を追いやすい。
 //!
-//! double-fork（fork → setsid → fork）によって孫プロセスを作ると、
-//! 孫は「新セッションのプロセスグループリーダーでない」孤立プロセスになり
-//! SIGTERM が届かなくなる。
+//! ## フォーカス競合の排除
 //!
-//! ## 孫での exec
+//! 固定 sleep で「タスクターミナルが閉じてフォーカスが戻るまで待つ」アプローチは
+//! マシン負荷によってレースコンディションが発生する。代わりに AppleScript の
+//! ポーリングループで Zed が実際に前面に来たことを確認してから cmd-r を送る。
+//! これにより固定 sleep への依存を排除する。
 //!
-//! fork 後の子プロセスで Rust ランタイム（スレッド等）が複数の状態を持つと
-//! 安全でない動作が起きうる。孫では sleep/osascript を sh 経由で exec し
-//! Rust ランタイムを置き換えることで POSIX async-signal-safe 規約を守る。
+//! ## cmd-r を直接送る理由
+//!
+//! hide: on_success でタスクターミナルが閉じると、フォーカスは元の Claude Code
+//! ターミナルに戻る。terminal_panel::ToggleFocus を挟むと、ターミナルが既に
+//! フォーカスされている場合にエディタ側に移ってしまう（toggle の副作用）。
+//! そのため cmd-r（terminal::Paste）を直接送る。
 
-use std::ffi::CString;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
-/// double-fork でデーモン化し、`delay` 後に Zed へ cmd-r を送る。
+/// osascript を新しいセッションで起動し、Zed がフォーカスを取り戻した後に cmd-r を送る。
 ///
-/// この関数は呼び出し元の親プロセスから戻るが、孫プロセスは
-/// バックグラウンドで `delay` ミリ秒後に osascript を起動する。
-pub fn inject_keystroke_after_delay(delay: Duration) {
-    let delay_secs = delay.as_secs_f64();
+/// `initial_delay` はタスクターミナルが閉じ始めるのを待つ最小時間。
+/// その後 AppleScript のポーリングで Zed が前面になるまで待機するため、
+/// 固定 sleep によるレースコンディションが発生しない。
+pub fn inject_keystroke_after_delay(initial_delay: Duration) {
+    let delay_secs = initial_delay.as_secs_f64();
+    let delay_line = format!("delay {delay_secs:.3}");
 
-    // osascript 2 コマンドを sh -c で繋いだ文字列
-    // 遅延後に (1) Zed をアクティブ化、(2) cmd-r をキーストローク送信
-    let script = format!(
-        "sleep {delay_secs:.3} \
-         && osascript -e 'tell application \"Zed\" to activate' \
-         && sleep 0.1 \
-         && osascript -e 'tell application \"System Events\" \
-                          to keystroke \"r\" using command down'"
-    );
+    let script_lines: &[&str] = &[
+        delay_line.as_str(),
+        "tell application \"Zed\" to activate",
+        // Zed が実際に前面に来るまでポーリング（最大 2 秒 = 0.05s × 40）
+        "set maxAttempts to 40",
+        "set gotFocus to false",
+        "repeat maxAttempts times",
+        "delay 0.05",
+        "tell application \"System Events\"",
+        "if (name of first process whose frontmost is true) is \"Zed\" then",
+        "set gotFocus to true",
+        "exit repeat",
+        "end if",
+        "end tell",
+        "end repeat",
+        "if gotFocus then",
+        "display notification \"貼り付け実行中\" with title \"claude-history-pick\"",
+        "delay 0.3",
+        "tell application \"System Events\"",
+        "keystroke \"r\" using command down",
+        "end tell",
+        "else",
+        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"claude-history-pick ⚠\"",
+        "end if",
+    ];
 
-    // CString への変換（exec に必要な null 終端バイト列）
-    let c_sh = match CString::new("sh") {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let c_dash_c = match CString::new("-c") {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let c_script = match CString::new(script) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    unsafe {
-        // ── 第 1 fork ──────────────────────────────────────────────
-        // 子が setsid() で新しいセッションを作る。
-        // 親（＝このプロセス）はすぐ wait して戻る。
-        match libc::fork() {
-            -1 => return, // fork 失敗: 静かに諦める（fzf 選択は成功済み）
-            0 => {
-                // ── 子プロセス ────────────────────────────────────
-                // 新セッションを作成し、制御端末から切り離す。
-                // ただしこの時点で子はセッションリーダーのため
-                // 後述の第 2 fork が必要。
-                libc::setsid();
-
-                // ── 第 2 fork ──────────────────────────────────────
-                // 孫を作り、子は即 exit する。
-                // 孫は「セッションリーダーでないプロセス」になるため
-                // Zed の SIGTERM から完全に切り離される。
-                match libc::fork() {
-                    -1 => libc::_exit(1),
-                    0 => {
-                        // ── 孫プロセス ────────────────────────────
-                        // exec で Rust ランタイムを sh に置き換える。
-                        // これにより fork 後の async-signal-safe 制約を回避する。
-                        let argv: &[*const libc::c_char] = &[
-                            c_sh.as_ptr(),
-                            c_dash_c.as_ptr(),
-                            c_script.as_ptr(),
-                            std::ptr::null(),
-                        ];
-                        libc::execvp(c_sh.as_ptr(), argv.as_ptr());
-                        // execvp が失敗した場合のみここに到達
-                        libc::_exit(1);
-                    }
-                    _ => libc::_exit(0), // 第 2 fork の子（孫の親）: すぐ終了
-                }
-            }
-            _ => {
-                // ── 第 1 fork の親 ────────────────────────────────
-                // 子の終了を wait してゾンビを回収してから呼び出し元へ戻る。
-                libc::wait(std::ptr::null_mut());
-            }
-        }
+    let mut cmd = Command::new("osascript");
+    for line in script_lines {
+        cmd.arg("-e").arg(line);
     }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    // fork 後の子プロセスで setsid() を呼び、Zed の SIGTERM から切り離す。
+    // pre_exec は fork 後・exec 前に子プロセスで実行される。
+    // setsid() は POSIX async-signal-safe 関数のためここで呼ぶのは安全。
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    cmd.spawn().ok();
 }
