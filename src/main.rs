@@ -33,18 +33,23 @@ const PASTE_DELAY: Duration = Duration::from_millis(100);
 fn main() {
     guard::acquire();
 
-    let history_path = if let Ok(p) = std::env::var("CLAUDE_HISTORY_PATH") {
-        PathBuf::from(p)
+    let (history_path, path_source) = if let Ok(p) = std::env::var("CLAUDE_HISTORY_PATH") {
+        (PathBuf::from(p), "CLAUDE_HISTORY_PATH")
     } else {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".claude/history.jsonl")
+        (PathBuf::from(home).join(".claude/history.jsonl"), "default")
     };
 
     let prompts = match history::load_prompts(&history_path) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("history.jsonl の読み込みに失敗: {e}");
-            eprintln!("パス: {}", history_path.display());
+            if path_source == "CLAUDE_HISTORY_PATH" {
+                eprintln!("CLAUDE_HISTORY_PATH で指定したパスが見つかりません: {}", history_path.display());
+                eprintln!("エラー: {e}");
+            } else {
+                eprintln!("history.jsonl の読み込みに失敗: {e}");
+                eprintln!("パス: {}", history_path.display());
+            }
             guard::release();
             std::process::exit(1);
         }
