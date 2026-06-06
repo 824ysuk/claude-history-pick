@@ -56,7 +56,6 @@ pub fn inject_keystroke_after_delay(initial_delay: Duration) {
         "end tell",
         "end repeat",
         "if gotFocus then",
-        "display notification \"貼り付け実行中\" with title \"claude-history-pick\"",
         "delay 0.3",
         "tell application \"System Events\"",
         "keystroke \"r\" using command down",
