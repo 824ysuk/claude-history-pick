@@ -24,7 +24,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::unistd::{getuid, Pid};
 use std::fs;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 fn lock_path() -> PathBuf {
@@ -56,14 +56,14 @@ pub fn release() {
     let _ = fs::remove_file(lock_path());
 }
 
-fn read_pid(path: &PathBuf) -> Option<libc::pid_t> {
+fn read_pid(path: &Path) -> Option<libc::pid_t> {
     let mut file = fs::File::open(path).ok()?;
     let mut buf = String::new();
     file.read_to_string(&mut buf).ok()?;
     buf.trim().parse().ok()
 }
 
-fn write_pid(path: &PathBuf) {
+fn write_pid(path: &Path) {
     if let Ok(mut file) = fs::File::create(path) {
         let _ = writeln!(file, "{}", std::process::id());
     }
@@ -79,21 +79,18 @@ fn is_our_process(pid: libc::pid_t) -> bool {
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
         .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out.stdout)
-                .contains("claude-history-pick")
-        })
+        .map(|out| String::from_utf8_lossy(&out.stdout).contains("claude-history-pick"))
         .unwrap_or(false)
 }
 
 /// テスト用: 任意パスへの read_pid / write_pid を公開する。
 #[cfg(test)]
-pub fn read_pid_from(path: &PathBuf) -> Option<libc::pid_t> {
+pub fn read_pid_from(path: &Path) -> Option<libc::pid_t> {
     read_pid(path)
 }
 
 #[cfg(test)]
-pub fn write_pid_to(path: &PathBuf) {
+pub fn write_pid_to(path: &Path) {
     write_pid(path)
 }
 
@@ -134,11 +131,11 @@ mod tests {
 
     #[test]
     fn write_and_read_pid_roundtrip() {
-        let path = PathBuf::from(format!("/tmp/guard-test-{}.lock", std::process::id()));
-        write_pid_to(&path);
-        let read = read_pid_from(&path).expect("PID が読めない");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        write_pid_to(tmp.path());
+        let read = read_pid_from(tmp.path()).expect("PID が読めない");
         assert_eq!(read, std::process::id() as libc::pid_t);
-        let _ = std::fs::remove_file(&path);
+        // tmp が Drop するとファイルは自動削除される
     }
 
     #[test]
@@ -149,11 +146,10 @@ mod tests {
 
     #[test]
     fn read_pid_returns_none_for_malformed_content() {
-        let path = PathBuf::from(format!("/tmp/guard-test-malformed-{}.lock", std::process::id()));
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "not-a-pid").unwrap();
-        assert!(read_pid_from(&path).is_none());
-        let _ = std::fs::remove_file(&path);
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        writeln!(tmp, "not-a-pid").unwrap();
+        assert!(read_pid_from(tmp.path()).is_none());
+        // tmp が Drop するとファイルは自動削除される
     }
 
     #[test]
@@ -161,12 +157,45 @@ mod tests {
         // cargo test のバイナリは claude-history-pick 本体なので true になる。
         // これは ps -o comm= が argv[0] フルパスを返すことの確認でもある。
         let my_pid = std::process::id() as libc::pid_t;
-        assert!(is_our_process_pub(my_pid), "テストバイナリ自体が claude-history-pick のはず");
+        assert!(
+            is_our_process_pub(my_pid),
+            "テストバイナリ自体が claude-history-pick のはず"
+        );
     }
 
     #[test]
     fn is_our_process_returns_false_for_dead_pid() {
         // 存在しない PID（大きな値）は false
         assert!(!is_our_process_pub(999_999));
+    }
+
+    // acquire/release は実際のロックファイルを操作するため直列化する。
+    // 並列実行すると acquire が相手の lock を evict してしまう。
+    static LOCK_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn acquire_writes_current_pid() {
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+        let _ = std::fs::remove_file(&path); // 残留ロックを除去してクリーンな状態にする
+
+        acquire();
+
+        let pid = read_pid_from(&path).expect("acquire がロックファイルを作成していない");
+        assert_eq!(pid, std::process::id() as libc::pid_t);
+
+        let _ = std::fs::remove_file(&path); // 後始末
+    }
+
+    #[test]
+    fn release_removes_lock_file() {
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+
+        acquire();
+        assert!(path.exists(), "前提: acquire 後にロックファイルが存在する");
+
+        release();
+        assert!(!path.exists(), "release 後にロックファイルが残っている");
     }
 }

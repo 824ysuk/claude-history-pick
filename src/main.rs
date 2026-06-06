@@ -35,9 +35,9 @@ fn main() {
 
     let history_path = {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let mut p = PathBuf::from(home);
-        p.push(".claude/history.jsonl");
-        p
+        let mut path = PathBuf::from(home);
+        path.push(".claude/history.jsonl");
+        path
     };
 
     let prompts = match history::load_prompts(&history_path) {
