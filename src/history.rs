@@ -61,6 +61,7 @@ pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
         }
     }
 
+    prompts.reverse();
     prompts
 }
 
@@ -93,7 +94,7 @@ mod tests {
 {"display":"重複テスト"}
 {"display":"別のプロンプト"}"#;
         let result = collect_prompts(lines(input));
-        assert_eq!(result, vec!["重複テスト", "別のプロンプト"]);
+        assert_eq!(result, vec!["別のプロンプト", "重複テスト"]);
     }
 
     #[test]
