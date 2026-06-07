@@ -167,8 +167,9 @@ fn evict(old_pid: libc::pid_t) {
     // SIGTERM 後に ncurses 終了処理が完了するまでポーリングで待つ。
     // 固定 sleep だと fzf の ncurses クリーンアップが 50ms を超えた場合に
     // 新旧 2 インスタンスがクリップボードを同時操作して二重ペーストが発生する。
-    if !wait_for_death(old_pid, Duration::from_millis(500)) {
-        // タイムアウト: SIGKILL で強制終了
+    // 500ms = 実測クリーンアップ上限（~50ms）の 10× 安全余裕。設計値（環境依存でない）。
+    const SIGTERM_WAIT_TIMEOUT: Duration = Duration::from_millis(500);
+    if !wait_for_death(old_pid, SIGTERM_WAIT_TIMEOUT) {
         kill(Pid::from_raw(old_pid), Signal::SIGKILL).ok();
     }
 
@@ -190,13 +191,16 @@ fn evict(old_pid: libc::pid_t) {
 /// プロセスの死亡をポーリングで確認する。
 ///
 /// `kill(pid, 0)` は ESRCH でプロセス消滅を検知する（シグナルを送らない）。
-/// 20ms ごとに確認し、`timeout` 以内に消滅すれば true を返す。
+/// `timeout` 以内に消滅すれば true を返す。
+/// ポーリング間隔 20ms は CPU を抑えつつ死亡検知遅延を最小化する設計値。
 fn wait_for_death(pid: libc::pid_t, timeout: Duration) -> bool {
+    // 20ms × 最大 25 回 = 500ms で SIGTERM_WAIT_TIMEOUT と対応する設計値。
+    const POLL_INTERVAL: Duration = Duration::from_millis(20);
     let start = Instant::now();
     while start.elapsed() < timeout {
         match kill(Pid::from_raw(pid), None) {
             Err(Errno::ESRCH) => return true, // プロセスが消滅
-            _ => std::thread::sleep(Duration::from_millis(20)),
+            _ => std::thread::sleep(POLL_INTERVAL),
         }
     }
     false

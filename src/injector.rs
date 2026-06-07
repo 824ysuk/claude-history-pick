@@ -53,6 +53,9 @@ fn osascript_log_path() -> PathBuf {
 /// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
 ///
 /// 各要素が `osascript -e <element>` の 1 行に対応する。
+/// ポーリング設計: 40 回 × 0.05s = 最大 2s で Zed フォーカス取得を確認する。
+/// フォーカス確定後 0.3s 安定待ちで keystroke を送る（Zed 入力受付前の race 防止）。
+/// これらの値は Zed 実機動作から導いた設計値（環境依存でなく設計上の余裕値）。
 fn build_script_args(initial_delay: Duration) -> Vec<String> {
     let delay_secs = initial_delay.as_secs_f64();
     vec![
