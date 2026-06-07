@@ -3,6 +3,7 @@
 //! 責務: fzf の起動・stdin への候補書き込み・stdout からの選択結果取得のみ。
 //! 履歴パース・クリップボード・キーストロークは扱わない。
 
+use crate::history::Prompt;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -12,19 +13,20 @@ use tempfile::NamedTempFile;
 ///
 /// fzf には各プロンプトの先頭行のみを表示候補として渡し、選択後にインデックスで
 /// オリジナル全文を逆引きする（複数行プロンプトが複数候補に分裂するバグを防ぐ）。
-/// プレビューパネルには一時ファイル経由でプロンプト全文を表示する。
+/// プレビューパネルには一時ファイル経由でプロンプト全文と記録時刻を表示する。
 /// ユーザーが Esc 等でキャンセルした場合は None を返す。
 /// fzf が見つからない場合も None を返す（エラーメッセージは stderr に出る）。
 ///
 /// 複数行プロンプトは先頭行のみを fzf に表示し、選択後にオリジナル全文を返す。
 /// インデックスをタブ区切りで付与して fzf 出力から逆引きするため、
 /// 先頭行が重複するプロンプトが存在しても正しいエントリを返せる。
-pub fn pick(prompts: &[String]) -> Option<String> {
+pub fn pick(prompts: &[Prompt]) -> Option<String> {
     // プレビュー用一時ファイル: tempfile はランダム名 + O_CREAT|O_EXCL で生成するため
     // 予測可能パスによる symlink attack を防げる。NamedTempFile は Drop で自動削除。
     let mut tmp = NamedTempFile::new().ok()?;
     for prompt in prompts {
-        let _ = writeln!(tmp, "{}", escape_newlines(prompt));
+        let ts = prompt.iso_timestamp.as_deref().unwrap_or("");
+        let _ = writeln!(tmp, "{}\t{}", escape_newlines(&prompt.display), ts);
     }
     let _ = tmp.flush();
     let tmp_path = tmp.path().to_path_buf();
@@ -43,7 +45,7 @@ pub fn pick(prompts: &[String]) -> Option<String> {
             "--with-nth",
             "2..", // インデックス列（1列目）を表示から除外
             "--preview",
-            &preview_cmd, // 一時ファイルからプロンプト全文を復元して表示
+            &preview_cmd, // 一時ファイルからプロンプト全文と時刻を復元して表示
             "--preview-window",
             "down:10:wrap", // 複数行プロンプトが見やすいよう 10 行に拡大
         ])
@@ -59,7 +61,7 @@ pub fn pick(prompts: &[String]) -> Option<String> {
     // stdin に "{index}\t{display_line}" を 1 行ずつ書き込む
     if let Some(mut stdin) = child.stdin.take() {
         for (i, prompt) in prompts.iter().enumerate() {
-            let _ = writeln!(stdin, "{}\t{}", i, display_line(prompt));
+            let _ = writeln!(stdin, "{}\t{}", i, display_line(&prompt.display));
         }
         // stdin を drop することで fzf 側の EOF が発生し、候補リストが確定する
     }
@@ -74,7 +76,7 @@ pub fn pick(prompts: &[String]) -> Option<String> {
         }
         // fzf は --with-nth でも行全体を返すため "{index}\t{display}" をパース
         let idx: usize = trimmed.split('\t').next()?.parse().ok()?;
-        prompts.get(idx).cloned()
+        prompts.get(idx).map(|p| p.display.clone())
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None
@@ -93,20 +95,21 @@ fn display_line(prompt: &str) -> String {
 ///
 /// 改行を \x1f (Unit Separator, octal \037) に置換することで、
 /// 1 プロンプト = 1 行として書き出せる。
-/// 復元は `tr '\037' '\n'` で行う（BSD / GNU tr 共通の octal エスケープ）。
+/// 復元は awk 内の gsub で行う。
 fn escape_newlines(prompt: &str) -> String {
     prompt.replace('\n', "\x1f")
 }
 
 /// fzf に渡す preview コマンド文字列を構築する（純粋関数）。
 ///
-/// `{1}` は fzf の 0-based インデックスプレースホルダ、awk の `NR` は 1-based のため
-/// `+1` で補正する。`\037` は `\x1f` (Unit Separator) の octal 表記（BSD tr / GNU tr 共通）。
-/// `tmp_path` は POSIX シェルエスケープで囲み、TMPDIR が攻撃者制御下にあっても
-/// コマンドインジェクションを防ぐ。
+/// 一時ファイルの各行形式: `{display_escaped}\t{iso_timestamp_or_empty}`
+/// - `{1}` は fzf の 0-based インデックスプレースホルダ、awk の `NR` は 1-based のため +1 で補正
+/// - タイムスタンプが存在する場合は `[YYYY-MM-DDTHH:MM:SS.sssZ]` をプレビュー先頭に表示
+/// - `\037` (Unit Separator) を `\n` に戻してプロンプト全文を表示
+/// - `tmp_path` は POSIX シェルエスケープで囲みインジェクションを防ぐ
 fn build_preview_cmd(tmp_path: &str) -> String {
     format!(
-        "awk 'NR=={{1}}+1' {} | tr '\\037' '\\n'",
+        "awk -F'\\t' 'NR=={{1}}+1 {{ if ($2 != \"\") printf \"[%s]\\n\\n\", $2; gsub(/\\037/, \"\\n\", $1); print $1 }}' {}",
         posix_shell_quote(tmp_path)
     )
 }
@@ -124,6 +127,13 @@ fn posix_shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_prompt(display: &str, ts: Option<&str>) -> Prompt {
+        Prompt {
+            display: display.to_string(),
+            iso_timestamp: ts.map(|s| s.to_string()),
+        }
+    }
 
     #[test]
     fn display_line_single_line() {
@@ -186,8 +196,6 @@ mod tests {
 
     #[test]
     fn posix_shell_quote_escapes_single_quote() {
-        // 攻撃者制御 TMPDIR でシングルクォート + コマンドが混入したケース。
-        // 結果は閉じ→エスケープ済 `'`→再オープン形式で literal として扱われる。
         assert_eq!(
             posix_shell_quote("/tmp/a';rm -rf /;'b"),
             r#"'/tmp/a'\'';rm -rf /;'\''b'"#
@@ -204,7 +212,6 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_includes_index_plus_one() {
-        // fzf {1} は 0-based、awk NR は 1-based のため +1 補正が必須。
         let cmd = build_preview_cmd("/tmp/chp-abc.txt");
         assert!(
             cmd.contains("NR=={1}+1"),
@@ -214,7 +221,6 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_quotes_tmp_path() {
-        // パス全体が POSIX シングルクォートで囲まれる（攻撃者制御 TMPDIR 防御）。
         let cmd = build_preview_cmd("/tmp/chp-abc.txt");
         assert!(
             cmd.contains("'/tmp/chp-abc.txt'"),
@@ -223,18 +229,26 @@ mod tests {
     }
 
     #[test]
-    fn build_preview_cmd_pipes_through_tr_for_us_to_lf() {
-        // \037 (US) → \n 復元の tr パイプが含まれることを担保する。
+    fn build_preview_cmd_shows_timestamp_when_present() {
+        // タイムスタンプ列（$2）が空でなければ printf で表示する節が含まれること。
         let cmd = build_preview_cmd("/tmp/chp-abc.txt");
         assert!(
-            cmd.contains("tr '\\037' '\\n'"),
-            "tr による改行復元パイプが欠落: {cmd}"
+            cmd.contains("if ($2 != \"\") printf"),
+            "タイムスタンプ表示節が欠落: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_restores_newlines_via_gsub() {
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("gsub(/\\037/, \"\\n\", $1)"),
+            "gsub による改行復元が欠落: {cmd}"
         );
     }
 
     #[test]
     fn build_preview_cmd_escapes_single_quote_in_path() {
-        // tmp_path にシングルクォートが混入してもインジェクションが起きない。
         let cmd = build_preview_cmd("/tmp/a';rm -rf /;'b");
         assert!(
             cmd.contains(r#"'/tmp/a'\'';rm -rf /;'\''b'"#),
@@ -243,10 +257,16 @@ mod tests {
     }
 
     #[test]
+    fn build_preview_cmd_uses_tab_as_field_separator() {
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("-F'\\t'"),
+            "awk フィールド区切り -F'\\t' が欠落: {cmd}"
+        );
+    }
+
+    #[test]
     fn escape_newlines_roundtrip_via_tr() {
-        // escape_newlines (\n → \x1f) と preview 側復元 (tr '\037' '\n') の
-        // ラウンドトリップが一致することを実プロセスで検証する。
-        // \x1f 以外への置換、tr の引数変更で対称性が崩れたら落ちる。
         let original = "line1\nline2\nline3\n複数行\nテスト";
         let escaped = escape_newlines(original);
         assert!(
@@ -270,7 +290,14 @@ mod tests {
         let restored = String::from_utf8(out.stdout).expect("UTF-8 復元失敗");
         assert_eq!(
             restored, original,
-            "escape_newlines → tr のラウンドトリップが一致しない"
+            "escape_newlines → gsub のラウンドトリップが一致しない"
         );
+    }
+
+    #[test]
+    fn make_prompt_helper_works() {
+        let p = make_prompt("test", Some("2026-06-07T00:00:00Z"));
+        assert_eq!(p.display, "test");
+        assert_eq!(p.iso_timestamp.as_deref(), Some("2026-06-07T00:00:00Z"));
     }
 }
