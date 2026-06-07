@@ -26,14 +26,36 @@
 //! ターミナルに戻る。terminal_panel::ToggleFocus を挟むと、ターミナルが既に
 //! フォーカスされている場合にエディタ側に移ってしまう（toggle の副作用）。
 //! そのため cmd-r（terminal::Paste）を直接送る。
+//!
+//! ## Accessibility 権限エラーの検知
+//!
+//! macOS の TCC で Accessibility 権限が未付与の場合、keystroke は
+//! `osascript is not allowed to send keystrokes` エラーで失敗する。
+//! AppleScript の `try ... on error ... end try` でこれをキャッチし、
+//! macOS 通知でアクセシビリティ設定を案内する。
+//! osascript の stderr は /tmp/<uid>.claude-history-pick.osascript.log に記録する。
 
+use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+/// osascript の stderr ログファイルパス。
+///
+/// UID を含めることでマルチユーザー環境での衝突を防ぐ。
+/// Accessibility 拒否時の `osascript is not allowed to send keystrokes` エラーを記録する。
+fn osascript_log_path() -> PathBuf {
+    let uid = unsafe { libc::getuid() };
+    PathBuf::from(format!("/tmp/{uid}.claude-history-pick.osascript.log"))
+}
 
 /// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
 ///
 /// 各要素が `osascript -e <element>` の 1 行に対応する。
+/// ポーリング設計: 40 回 × 0.05s = 最大 2s で Zed フォーカス取得を確認する。
+/// フォーカス確定後 0.3s 安定待ちで keystroke を送る（Zed 入力受付前の race 防止）。
+/// これらの値は Zed 実機動作から導いた設計値（環境依存でなく設計上の余裕値）。
 fn build_script_args(initial_delay: Duration) -> Vec<String> {
     let delay_secs = initial_delay.as_secs_f64();
     vec![
@@ -53,9 +75,15 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
         "end repeat".to_string(),
         "if gotFocus then".to_string(),
         "delay 0.3".to_string(),
+        // try/on error で Accessibility 権限エラーをキャッチする。
+        // TCC が keystroke を拒否すると -1719 (errAEEventNotPermitted) が返る。
+        "try".to_string(),
         "tell application \"System Events\"".to_string(),
         "keystroke \"r\" using command down".to_string(),
         "end tell".to_string(),
+        "on error errMsg number errNum".to_string(),
+        "display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"claude-history-pick ⚠ Accessibility 権限\"".to_string(),
+        "end try".to_string(),
         "else".to_string(),
         "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"claude-history-pick ⚠\"".to_string(),
         "end if".to_string(),
@@ -84,9 +112,19 @@ fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::i
     for line in build_script_args(initial_delay) {
         cmd.arg("-e").arg(line);
     }
+
+    // stderr をログファイルに記録する。Accessibility 拒否エラーの診断に使う。
+    // open 失敗時は /dev/null にフォールバックし、本機能を止めない。
+    let stderr = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(osascript_log_path())
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null());
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
 
     // fork 後の子プロセスで setsid() を呼び、Zed の SIGTERM から切り離す。
     // pre_exec は fork 後・exec 前に子プロセスで実行される。
@@ -147,11 +185,54 @@ mod tests {
     }
 
     #[test]
-    fn script_args_count_is_21() {
+    fn accessibility_error_notification_is_present() {
+        // Accessibility 権限拒否時の通知行が存在することを確認する。
+        // この行が欠けると TCC 拒否がサイレントになり Issue #37 が再発する。
+        let args = build_script_args(Duration::from_millis(500));
+        assert!(
+            args.iter()
+                .any(|s| s.contains("アクセシビリティ") && s.contains("display notification")),
+            "Accessibility 権限エラー通知行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn try_on_error_block_wraps_keystroke() {
+        // `try` が `keystroke` より前、`on error` が `keystroke` より後に存在することで
+        // keystroke が try/on error ブロックに包まれていることを検証する。
+        let args = build_script_args(Duration::from_millis(500));
+        let try_pos = args.iter().position(|s| s == "try");
+        let keystroke_pos = args
+            .iter()
+            .position(|s| s.contains("keystroke \"r\" using command down"));
+        let on_error_pos = args.iter().position(|s| s.starts_with("on error"));
+        let end_try_pos = args.iter().position(|s| s == "end try");
+
+        assert!(try_pos.is_some(), "`try` 行が見つからない");
+        assert!(keystroke_pos.is_some(), "`keystroke` 行が見つからない");
+        assert!(on_error_pos.is_some(), "`on error` 行が見つからない");
+        assert!(end_try_pos.is_some(), "`end try` 行が見つからない");
+
+        assert!(
+            try_pos.unwrap() < keystroke_pos.unwrap(),
+            "`try` が `keystroke` より後にある"
+        );
+        assert!(
+            keystroke_pos.unwrap() < on_error_pos.unwrap(),
+            "`on error` が `keystroke` より前にある"
+        );
+        assert!(
+            on_error_pos.unwrap() < end_try_pos.unwrap(),
+            "`end try` が `on error` より前にある"
+        );
+    }
+
+    #[test]
+    fn script_args_count_is_25() {
         let args = build_script_args(Duration::from_millis(500));
         assert_eq!(
             args.len(),
-            21,
+            25,
             "スクリプト行数が想定と異なる: {}",
             args.len()
         );
