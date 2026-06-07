@@ -23,13 +23,14 @@ struct HistoryEntry {
 /// - '/' 始まりのスラッシュコマンド（`/help` 等）を除外
 /// - 重複エントリは先出順で除去（awk '!seen[$0]++' の Rust 等価）
 ///
-/// パース失敗行はスキップし、ファイル全体の読み込みは続行する。
+/// JSON パース失敗行はスキップし、ファイル全体の読み込みは続行する。
+/// 一方で行読み込み中の IO エラー（NFS 断絶・ディスク EIO 等）は
+/// 履歴欠落をサイレントに招くため、呼び出し元に伝播する。
 pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<String>> {
     let file = File::open(history_path)?;
     let reader = BufReader::new(file);
-    Ok(collect_prompts(
-        reader.lines().map(|l| l.unwrap_or_default()),
-    ))
+    let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
+    Ok(collect_prompts(lines.into_iter()))
 }
 
 /// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
