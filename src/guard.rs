@@ -231,4 +231,63 @@ mod tests {
         release();
         assert!(!path.exists(), "release 後にロックファイルが残っている");
     }
+
+    #[test]
+    fn acquire_succeeds_when_lock_contains_malformed_pid() {
+        // ロックファイルが壊れた内容で残っていても、acquire は何事もなく
+        // 自 PID で上書きする (read_pid が None を返す経路の結合検証)。
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "not-a-pid\n").expect("malformed lock を書けない");
+
+        acquire();
+
+        let pid = read_pid_from(&path).expect("acquire 後に PID が読めない");
+        assert_eq!(
+            pid,
+            std::process::id() as libc::pid_t,
+            "malformed lock を上書きできていない"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn acquire_succeeds_when_lock_is_empty() {
+        // 0 byte のロックファイル (kill -9 / ディスク full 等で発生しうる) でも
+        // acquire は自 PID で上書きする。
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+        let _ = std::fs::remove_file(&path);
+        std::fs::File::create(&path).expect("空ファイルを作れない");
+
+        acquire();
+
+        let pid = read_pid_from(&path).expect("acquire 後に PID が読めない");
+        assert_eq!(pid, std::process::id() as libc::pid_t);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn acquire_overwrites_stale_dead_pid() {
+        // 死んでいる PID が書かれている場合: is_our_process が false を返して
+        // evict を skip し、そのまま write_pid に進んで自 PID で上書きする。
+        let _guard = LOCK_MUTEX.lock().unwrap();
+        let path = lock_path();
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, "999999\n").expect("stale PID を書けない");
+
+        acquire();
+
+        let pid = read_pid_from(&path).expect("acquire 後に PID が読めない");
+        assert_eq!(
+            pid,
+            std::process::id() as libc::pid_t,
+            "stale dead PID を上書きできていない"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
 }
