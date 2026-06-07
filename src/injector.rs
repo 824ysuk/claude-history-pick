@@ -136,4 +136,47 @@ mod tests {
             args.len()
         );
     }
+
+    #[test]
+    fn zed_activate_line_is_present() {
+        // Zed をフロントに持ち上げる行が欠けると activate されず、
+        // ポーリングがタイムアウトして fallback 通知に流れる。
+        let args = build_script_args(Duration::from_millis(100));
+        assert!(
+            args.iter().any(|s| s == "tell application \"Zed\" to activate"),
+            "Zed activate 行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn cmd_r_keystroke_line_is_present() {
+        // この行が terminal::Paste 発火本体。`"r"` → 別キー、`command` → `option` 等の
+        // 改変で paste が無効化されるが、行数や delay の検証では捕まらない。
+        let args = build_script_args(Duration::from_millis(100));
+        assert!(
+            args.iter().any(|s| s == "keystroke \"r\" using command down"),
+            "cmd-r keystroke 行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn polling_delay_is_50ms() {
+        // ポーリング間隔。maxAttempts(40) × 0.05s = 2s の総待機時間設計を支える。
+        let args = build_script_args(Duration::from_millis(100));
+        assert!(
+            args.iter().any(|s| s == "delay 0.05"),
+            "ポーリング間隔 (delay 0.05) 行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn post_focus_settle_delay_is_300ms() {
+        // フォーカス取得直後の settle 時間。これが消えると Zed の入力受付前に
+        // keystroke が送られ paste が取りこぼされる。
+        let args = build_script_args(Duration::from_millis(100));
+        assert!(
+            args.iter().any(|s| s == "delay 0.3"),
+            "フォーカス取得後 settle (delay 0.3) 行が見つからない: {args:?}"
+        );
+    }
 }
