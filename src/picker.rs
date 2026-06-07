@@ -6,14 +6,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-/// プレビュー用一時ファイルのスコープ終了時に自動削除する RAII ガード。
-struct TmpFile(std::path::PathBuf);
-
-impl Drop for TmpFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+use tempfile::NamedTempFile;
 
 /// `prompts` を fzf に渡してインタラクティブ選択させ、選択されたオリジナル全文を返す。
 ///
@@ -27,22 +20,21 @@ impl Drop for TmpFile {
 /// インデックスをタブ区切りで付与して fzf 出力から逆引きするため、
 /// 先頭行が重複するプロンプトが存在しても正しいエントリを返せる。
 pub fn pick(prompts: &[String]) -> Option<String> {
-    // プレビュー用一時ファイル: プロンプト全文を 1 行ずつ書き出す（改行は \x1f に置換）
-    // ファイルは関数終了時に TmpFile::drop で自動削除される
-    let tmp_path = std::env::temp_dir().join(format!("chp-{}.txt", std::process::id()));
-    {
-        let mut f = std::fs::File::create(&tmp_path).ok()?;
-        for prompt in prompts {
-            let _ = writeln!(f, "{}", escape_newlines(prompt));
-        }
+    // プレビュー用一時ファイル: tempfile はランダム名 + O_CREAT|O_EXCL で生成するため
+    // 予測可能パスによる symlink attack を防げる。NamedTempFile は Drop で自動削除。
+    let mut tmp = NamedTempFile::new().ok()?;
+    for prompt in prompts {
+        let _ = writeln!(tmp, "{}", escape_newlines(prompt));
     }
-    let _tmp_guard = TmpFile(tmp_path.clone());
+    let _ = tmp.flush();
+    let tmp_path = tmp.path().to_path_buf();
 
     // {1} は fzf の 0-based インデックス、NR は 1-based のため +1 する
     // \037 は \x1f (Unit Separator) の octal 表記（BSD tr / GNU tr 共通）
+    // パスは POSIX シェルエスケープで囲む（TMPDIR が攻撃者制御下にあっても安全）
     let preview_cmd = format!(
-        "awk 'NR=={{1}}+1' '{}' | tr '\\037' '\\n'",
-        tmp_path.to_string_lossy()
+        "awk 'NR=={{1}}+1' {} | tr '\\037' '\\n'",
+        posix_shell_quote(&tmp_path.to_string_lossy())
     );
 
     let mut child = Command::new("fzf")
@@ -112,6 +104,16 @@ fn escape_newlines(prompt: &str) -> String {
     prompt.replace('\n', "\x1f")
 }
 
+/// POSIX シェルのシングルクォート文字列としてエスケープする。
+///
+/// シングルクォート内では `'` 以外すべて literal として扱われるため、
+/// `'` を `'\''`（閉じ → エスケープした `'` → 再オープン）に置換すれば任意文字列を安全に表せる。
+/// preview_cmd は `sh -c` 経由で実行されるため、TMPDIR や tempfile パスに将来
+/// シングルクォート等が混入してもコマンドインジェクションを防げる。
+fn posix_shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,5 +165,33 @@ mod tests {
     fn escape_newlines_preserves_tabs() {
         // タブはそのまま保持（display_line が別途スペース変換する）
         assert_eq!(escape_newlines("a\tb"), "a\tb");
+    }
+
+    #[test]
+    fn posix_shell_quote_plain_path() {
+        assert_eq!(posix_shell_quote("/tmp/chp-abc.txt"), "'/tmp/chp-abc.txt'");
+    }
+
+    #[test]
+    fn posix_shell_quote_empty() {
+        assert_eq!(posix_shell_quote(""), "''");
+    }
+
+    #[test]
+    fn posix_shell_quote_escapes_single_quote() {
+        // 攻撃者制御 TMPDIR でシングルクォート + コマンドが混入したケース。
+        // 結果は閉じ→エスケープ済 `'`→再オープン形式で literal として扱われる。
+        assert_eq!(
+            posix_shell_quote("/tmp/a';rm -rf /;'b"),
+            r#"'/tmp/a'\'';rm -rf /;'\''b'"#
+        );
+    }
+
+    #[test]
+    fn posix_shell_quote_handles_spaces_and_specials() {
+        assert_eq!(
+            posix_shell_quote("/tmp/path with $space/`cmd`"),
+            "'/tmp/path with $space/`cmd`'"
+        );
     }
 }

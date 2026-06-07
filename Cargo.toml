@@ -19,8 +19,8 @@ libc = "0.2"
 # guard.rs の signal 送信・getuid を unsafe なしで扱う安全ラッパー
 nix = { version = "0.29", default-features = false, features = ["signal", "user"] }
 
-[dev-dependencies]
-# テスト内の一時ファイルを RAII で管理（パニック時も Drop で自動削除）
+# picker.rs のプレビュー用一時ファイル: ランダム名 + O_CREAT|O_EXCL + RAII で
+# 予測可能パスによる symlink attack を防ぐ
 tempfile = "3"
 
 [profile.release]
