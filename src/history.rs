@@ -79,7 +79,10 @@ fn is_bare_slash_command(s: &str) -> bool {
     let Some(name) = s.strip_prefix('/') else {
         return false;
     };
-    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// 最新出現を優先して重複除去する（fzf の体感に合わせ末尾優先）。
