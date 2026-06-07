@@ -148,7 +148,10 @@ mod tests {
 
     #[test]
     fn escape_newlines_multiline() {
-        assert_eq!(escape_newlines("first\nsecond\nthird"), "first\x1fsecond\x1fthird");
+        assert_eq!(
+            escape_newlines("first\nsecond\nthird"),
+            "first\x1fsecond\x1fthird"
+        );
     }
 
     #[test]
