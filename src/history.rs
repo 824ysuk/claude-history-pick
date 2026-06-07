@@ -28,7 +28,12 @@ struct HistoryEntry {
 /// 履歴欠落をサイレントに招くため、呼び出し元に伝播する。
 pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<String>> {
     let file = File::open(history_path)?;
-    let reader = BufReader::new(file);
+    load_prompts_from_reader(BufReader::new(file))
+}
+
+/// `BufRead` から JSONL を読み込み、表示用プロンプト一覧を返す。
+/// IO エラー注入テストのために path 受領層から切り出している。
+fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<String>> {
     let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
     Ok(collect_prompts(lines.into_iter()))
 }
@@ -69,9 +74,63 @@ pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Read};
 
     fn lines(raw: &str) -> impl Iterator<Item = String> + '_ {
         raw.lines().map(|l| l.to_string())
+    }
+
+    /// 1 回目の read で常に IO エラーを返す Reader。
+    struct ErrorOnFirstRead;
+    impl Read for ErrorOnFirstRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::other("simulated EIO"))
+        }
+    }
+
+    /// 先に data を返してから次の read で IO エラーを返す Reader。
+    /// ストリーム途中で IO エラーが起きるケースを再現する。
+    struct DataThenError {
+        data: Vec<u8>,
+        pos: usize,
+        errored: bool,
+    }
+    impl Read for DataThenError {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos < self.data.len() {
+                let n = (self.data.len() - self.pos).min(buf.len());
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                return Ok(n);
+            }
+            if !self.errored {
+                self.errored = true;
+                return Err(io::Error::other("simulated mid-stream EIO"));
+            }
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn io_error_at_start_is_propagated() {
+        let result = load_prompts_from_reader(BufReader::new(ErrorOnFirstRead));
+        let err = result.expect_err("先頭での IO エラーは Err として伝播すべき");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn io_error_mid_stream_is_propagated_not_silenced() {
+        // 過去実装は `lines().map(|l| l.unwrap_or_default())` で Err を空文字列に
+        // 変換し、直後の空行スキップでサイレント破棄していた (Issue #33)。
+        // ストリーム途中の IO エラーが Err として呼び出し元に届くことを保証する。
+        let data = "{\"display\":\"前半行\"}\n".as_bytes().to_vec();
+        let reader = BufReader::new(DataThenError {
+            data,
+            pos: 0,
+            errored: false,
+        });
+        let result = load_prompts_from_reader(reader);
+        assert!(result.is_err(), "ストリーム途中の IO エラーを伝播すべき");
     }
 
     #[test]
