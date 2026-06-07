@@ -143,7 +143,8 @@ mod tests {
         // ポーリングがタイムアウトして fallback 通知に流れる。
         let args = build_script_args(Duration::from_millis(100));
         assert!(
-            args.iter().any(|s| s == "tell application \"Zed\" to activate"),
+            args.iter()
+                .any(|s| s == "tell application \"Zed\" to activate"),
             "Zed activate 行が見つからない: {args:?}"
         );
     }
@@ -154,7 +155,8 @@ mod tests {
         // 改変で paste が無効化されるが、行数や delay の検証では捕まらない。
         let args = build_script_args(Duration::from_millis(100));
         assert!(
-            args.iter().any(|s| s == "keystroke \"r\" using command down"),
+            args.iter()
+                .any(|s| s == "keystroke \"r\" using command down"),
             "cmd-r keystroke 行が見つからない: {args:?}"
         );
     }
