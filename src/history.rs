@@ -10,10 +10,22 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 /// history.jsonl の 1 行に対応する構造体。
-/// `display` フィールドだけ取り出し、他フィールドは無視する。
 #[derive(Deserialize)]
 struct HistoryEntry {
     display: Option<String>,
+    #[serde(rename = "isoTimestamp")]
+    iso_timestamp: Option<String>,
+}
+
+/// フィルタリング・重複除去済みのプロンプト。
+///
+/// `display` は表示・クリップボードコピー用のテキスト全文。
+/// `iso_timestamp` は `history.jsonl` の `isoTimestamp` フィールド（ISO 8601）。
+/// タイムスタンプが存在しない行（旧形式）は `None`。
+#[derive(Debug)]
+pub struct Prompt {
+    pub display: String,
+    pub iso_timestamp: Option<String>,
 }
 
 /// `history_path` の JSONL を読み込み、表示用プロンプト一覧を返す。
@@ -23,28 +35,28 @@ struct HistoryEntry {
 /// - 単独スラッシュコマンド形式（`/help` `/code-review` 等、`/` + 英数/ハイフン/
 ///   アンダースコアのみ）を除外。引数や記号を伴うもの（`/loop 5m /foo` `/foo:bar`）
 ///   は再利用価値が高いため採用する
-/// - 重複エントリは先出順で除去（awk '!seen[$0]++' の Rust 等価）
+/// - 重複エントリは最新出現を優先して除去（`iso_timestamp` は最新を保持）
 ///
 /// JSON パース失敗行はスキップし、ファイル全体の読み込みは続行する。
 /// 一方で行読み込み中の IO エラー（NFS 断絶・ディスク EIO 等）は
 /// 履歴欠落をサイレントに招くため、呼び出し元に伝播する。
-pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<String>> {
+pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<Prompt>> {
     let file = File::open(history_path)?;
     load_prompts_from_reader(BufReader::new(file))
 }
 
 /// `BufRead` から JSONL を読み込み、表示用プロンプト一覧を返す。
 /// IO エラー注入テストのために path 受領層から切り出している。
-fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<String>> {
+fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<Prompt>> {
     let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
     Ok(collect_prompts(lines.into_iter()))
 }
 
-/// JSONL 1 行から表示用テキスト（`display` フィールド）を取り出す。
+/// JSONL 1 行から `Prompt` を取り出す。
 ///
 /// 空行・JSON パース失敗・`display` 欠落・空文字列はすべて `None` を返す。
 /// 上流で `filter_map` に渡すことを想定。
-fn parse_display(line: &str) -> Option<String> {
+fn parse_entry(line: &str) -> Option<Prompt> {
     if line.trim().is_empty() {
         return None;
     }
@@ -53,7 +65,10 @@ fn parse_display(line: &str) -> Option<String> {
     if display.is_empty() {
         None
     } else {
-        Some(display)
+        Some(Prompt {
+            display,
+            iso_timestamp: entry.iso_timestamp,
+        })
     }
 }
 
@@ -87,13 +102,13 @@ fn is_bare_slash_command(s: &str) -> bool {
 
 /// 最新出現を優先して重複除去する（fzf の体感に合わせ末尾優先）。
 ///
-/// 入力は時系列（古い→新しい）を想定。同一文字列は最後の出現位置だけ残し、
-/// 新しい順（新→古）に並び替えて返す。
-fn dedup_keep_last(prompts: Vec<String>) -> Vec<String> {
-    let mut seen = HashSet::new();
+/// 入力は時系列（古い→新しい）を想定。同一 `display` は最後の出現位置だけ残し、
+/// 新しい順（新→古）に並び替えて返す。最後の出現 = 最新タイムスタンプを保持する。
+fn dedup_keep_last(prompts: Vec<Prompt>) -> Vec<Prompt> {
+    let mut seen: HashSet<String> = HashSet::new();
     let mut result = Vec::with_capacity(prompts.len());
     for p in prompts.into_iter().rev() {
-        if seen.insert(p.clone()) {
+        if seen.insert(p.display.clone()) {
             result.push(p);
         }
     }
@@ -105,10 +120,10 @@ fn dedup_keep_last(prompts: Vec<String>) -> Vec<String> {
 /// 構成: parse → filter → dedup の 3 段。各段はファイル内の private 関数として
 /// 単独で意味を持つ。ファイル I/O を伴わないため失敗しない（返り値を Result に
 /// しないことでその事実を型で表現する）。
-pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
-    let eligible: Vec<String> = lines
-        .filter_map(|l| parse_display(&l))
-        .filter(|d| is_eligible(d))
+pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<Prompt> {
+    let eligible: Vec<Prompt> = lines
+        .filter_map(|l| parse_entry(&l))
+        .filter(|p| is_eligible(&p.display))
         .collect();
     dedup_keep_last(eligible)
 }
@@ -120,6 +135,10 @@ mod tests {
 
     fn lines(raw: &str) -> impl Iterator<Item = String> + '_ {
         raw.lines().map(|l| l.to_string())
+    }
+
+    fn displays(prompts: Vec<Prompt>) -> Vec<String> {
+        prompts.into_iter().map(|p| p.display).collect()
     }
 
     /// 1 回目の read で常に IO エラーを返す Reader。
@@ -178,15 +197,46 @@ mod tests {
     #[test]
     fn normal_entry_is_included() {
         let input = r#"{"display":"ビルドして"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["ビルドして"]);
+    }
+
+    #[test]
+    fn iso_timestamp_is_preserved() {
+        let input = r#"{"display":"ビルドして","isoTimestamp":"2026-06-03T01:20:13.918Z"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(
+            result[0].iso_timestamp.as_deref(),
+            Some("2026-06-03T01:20:13.918Z")
+        );
+    }
+
+    #[test]
+    fn missing_iso_timestamp_is_none() {
+        let input = r#"{"display":"ビルドして"}"#;
+        let result = collect_prompts(lines(input));
+        assert!(result[0].iso_timestamp.is_none());
+    }
+
+    #[test]
+    fn dedup_keeps_latest_timestamp() {
+        // 同一 display の重複のうち最新（末尾）の iso_timestamp を保持することを検証する。
+        let input = r#"{"display":"重複","isoTimestamp":"2026-01-01T00:00:00Z"}
+{"display":"重複","isoTimestamp":"2026-06-03T10:00:00Z"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].iso_timestamp.as_deref(),
+            Some("2026-06-03T10:00:00Z"),
+            "最新のタイムスタンプを保持すべき"
+        );
     }
 
     #[test]
     fn bare_slash_command_is_excluded() {
         let input = r#"{"display":"/help"}
 {"display":"通常のプロンプト"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["通常のプロンプト"]);
     }
 
@@ -196,7 +246,7 @@ mod tests {
         let input = r#"{"display":"/loop 5m /foo"}
 {"display":"/code-review --comment"}
 {"display":"/help"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["/code-review --comment", "/loop 5m /foo"]);
     }
 
@@ -204,7 +254,7 @@ mod tests {
     fn slash_command_with_tab_is_included() {
         // tab を含む slash command は単独形でないため採用する。
         let input = "{\"display\":\"/foo\\tbar\"}";
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["/foo\tbar"]);
     }
 
@@ -212,7 +262,7 @@ mod tests {
     fn slash_command_with_fullwidth_space_is_included() {
         // 全角スペース (U+3000) 混入の slash command は単独形でないため採用する。
         let input = "{\"display\":\"/loop　5m\"}";
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["/loop\u{3000}5m"]);
     }
 
@@ -221,7 +271,7 @@ mod tests {
         // 記号区切り（`:` `;` `|` `=` 等）も単独形でないため採用する。
         let input = r#"{"display":"/foo:bar"}
 {"display":"/foo=v"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["/foo=v", "/foo:bar"]);
     }
 
@@ -231,7 +281,7 @@ mod tests {
         // メニューで補える）。
         let input = r#"{"display":"/code-review"}
 {"display":"通常のプロンプト"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["通常のプロンプト"]);
     }
 
@@ -239,7 +289,7 @@ mod tests {
     fn lone_slash_is_not_treated_as_bare_command() {
         // `/` 単独は slash command 名がないため bare 扱いしない（採用）。
         let input = r#"{"display":"/"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["/"]);
     }
 
@@ -248,7 +298,7 @@ mod tests {
         let input = r#"{"display":"重複テスト"}
 {"display":"重複テスト"}
 {"display":"別のプロンプト"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["別のプロンプト", "重複テスト"]);
     }
 
@@ -256,7 +306,7 @@ mod tests {
     fn empty_display_is_excluded() {
         let input = r#"{"display":""}
 {"display":"有効なプロンプト"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["有効なプロンプト"]);
     }
 
@@ -264,7 +314,7 @@ mod tests {
     fn missing_display_field_is_skipped() {
         let input = r#"{"other_field":"value"}
 {"display":"有効"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["有効"]);
     }
 
@@ -272,14 +322,14 @@ mod tests {
     fn invalid_json_line_is_skipped() {
         let input = r#"not-json
 {"display":"有効"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["有効"]);
     }
 
     #[test]
     fn whitespace_is_trimmed() {
         let input = r#"{"display":"  前後スペース  "}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["前後スペース"]);
     }
 
@@ -294,7 +344,7 @@ mod tests {
         // JSON の \n はパース後に実際の改行文字になる。
         // history 層はそのまま保持し、正規化は picker 層に委ねる。
         let input = r#"{"display":"line1\nline2"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         assert_eq!(result, vec!["line1\nline2"]);
     }
 
@@ -303,7 +353,7 @@ mod tests {
         let input = r#"{"display":"line1\nline2"}
 {"display":"line1\nline2"}
 {"display":"line1\nline3"}"#;
-        let result = collect_prompts(lines(input));
+        let result = displays(collect_prompts(lines(input)));
         // collect_prompts は最新優先で返すため、ファイル末尾（line3）が先頭に来る
         assert_eq!(result, vec!["line1\nline3", "line1\nline2"]);
     }
