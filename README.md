@@ -41,10 +41,12 @@ src/
 
 | ツール | 用途 | インストール |
 |---|---|---|
-| `fzf` | 対話型 fuzzy finder | `brew install fzf` |
+| `fzf` (>= 0.20) | 対話型 fuzzy finder | `brew install fzf` |
 | `pbcopy` | クリップボード書き込み | macOS 標準（不要） |
 | `osascript` | キーストローク注入 | macOS 標準（不要） |
 | `cargo` | ビルド | [rustup.rs](https://rustup.rs) |
+
+fzf は `--with-nth` / `--delimiter` を使うため 0.20 以降が必要（`brew install fzf` の現行 0.44+ は要件を満たす）。
 
 ## セットアップ
 
