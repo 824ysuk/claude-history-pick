@@ -3,12 +3,18 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # 毎週月曜 09:00 UTC (JST 月曜 18:00)。
+    # push なし期間に登録された新規 RustSec advisory を検出するため (#30)
+    - cron: '0 9 * * 1'
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   ci:
+    # schedule トリガー時は audit のみ走らせる (fmt/clippy/test はコード変更時のみ意味がある)
+    if: github.event_name != 'schedule'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
