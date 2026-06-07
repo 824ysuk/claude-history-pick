@@ -73,21 +73,28 @@ fn write_pid(path: &Path) {
 ///
 /// macOS では process name (comm) が 15 文字に切り詰められるため
 /// `pgrep -x claude-history-pick`（19 文字）は常に空を返す。
-/// `ps -o comm=` は argv[0]（フルパス）を返すため切り詰めが起きない。
+/// `ps -o comm=` は argv[0] を返す。PATH 経由起動ではベア名（例: `claude-history-pick`）、
+/// フルパス起動ではフルパスになるため、basename で比較する。
 ///
-/// `current_exe()` との完全一致で判定するため、バイナリを別名でコピーしても
-/// 誤 kill しない。hardcoded 文字列への依存も排除する。
+/// basename 一致で判定することで、バイナリを別名でコピーしても誤 kill しない。
+/// hardcoded 文字列への依存も排除する。
 fn is_our_process(pid: libc::pid_t) -> bool {
     let Ok(our_exe) = std::env::current_exe() else {
         return false;
     };
+    let Some(exe_basename) = our_exe.file_name() else {
+        return false;
+    };
+    let exe_basename = exe_basename.to_string_lossy();
     std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
         .output()
         .ok()
         .map(|out| {
             let comm = String::from_utf8_lossy(&out.stdout);
-            comm.trim() == our_exe.to_string_lossy().as_ref()
+            let comm = comm.trim();
+            // PATH 経由起動: comm はベア名。フルパス起動: comm はフルパス。両方を許容する。
+            comm == exe_basename.as_ref() || comm.ends_with(&format!("/{exe_basename}"))
         })
         .unwrap_or(false)
 }
@@ -162,27 +169,29 @@ mod tests {
     }
 
     #[test]
-    fn ps_comm_matches_current_exe() {
+    fn ps_comm_matches_exe_basename_or_fullpath() {
         // is_our_process の動作基盤となる前提を直接検証する:
-        // ps -o comm= は current_exe() と同じフルパスを返す。
+        // ps -o comm= は argv[0] を返す。フルパス起動ならフルパス、
+        // PATH 経由（ベア名）起動ならベア名になるため、basename との一致を確認する。
         let my_pid = std::process::id() as libc::pid_t;
         let exe = std::env::current_exe().unwrap();
+        let exe_basename = exe.file_name().unwrap().to_string_lossy();
         let output = std::process::Command::new("ps")
             .args(["-p", &my_pid.to_string(), "-o", "comm="])
             .output()
             .unwrap();
         let comm = String::from_utf8_lossy(&output.stdout);
-        assert_eq!(
-            comm.trim(),
-            exe.to_string_lossy().as_ref(),
-            "ps -o comm= は argv[0] フルパスを返すはず"
+        let comm = comm.trim();
+        assert!(
+            comm == exe_basename.as_ref() || comm.ends_with(&format!("/{exe_basename}")),
+            "ps -o comm= はベア名かフルパスを返すはず (got: {comm:?}, basename: {exe_basename:?})"
         );
     }
 
     #[test]
     fn is_our_process_recognizes_self() {
-        // current_exe() との完全一致で判定するため、
-        // ディレクトリ名や binary 名に依存せず自プロセスを識別できる。
+        // basename 一致で判定するため、
+        // ディレクトリ名に依存せず自プロセスを識別できる。
         let my_pid = std::process::id() as libc::pid_t;
         assert!(is_our_process_pub(my_pid), "自プロセスを識別できるはず");
     }
