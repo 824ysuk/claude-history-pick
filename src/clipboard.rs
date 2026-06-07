@@ -11,17 +11,24 @@ use std::process::{Command, Stdio};
 /// pbcopy の stdin にテキストを書き込む。
 /// fzf 選択結果を Zed の terminal::Paste で貼り付けるための中継地点。
 pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
-    let mut child = Command::new("pbcopy").stdin(Stdio::piped()).spawn()?;
+    run_copy("pbcopy", &[], text)
+}
+
+fn run_copy(program: &str, args: &[&str], text: &str) -> std::io::Result<()> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin.write_all(text.as_bytes())?;
-        // stdin drop → pbcopy に EOF が届きコピー完了
+        // stdin drop → プロセスに EOF が届きコピー完了
     }
 
     let status = child.wait()?;
     if !status.success() {
         return Err(std::io::Error::other(format!(
-            "pbcopy exited with {status}"
+            "{program} exited with {status}"
         )));
     }
     Ok(())
@@ -59,5 +66,15 @@ mod tests {
         let _guard = CLIPBOARD_MUTEX.lock().unwrap();
         copy_to_clipboard("line1\nline2").expect("pbcopy failed");
         assert_eq!(pbpaste(), "line1\nline2");
+    }
+
+    #[test]
+    fn nonzero_exit_returns_err() {
+        // stdin を読み切ってから exit 1 する sh スクリプトで
+        // exit status チェックのパスを直接検証する
+        let result = run_copy("sh", &["-c", "cat > /dev/null; exit 1"], "test");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("exited with"), "error message: {msg}");
     }
 }
