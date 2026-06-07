@@ -29,13 +29,7 @@ pub fn pick(prompts: &[String]) -> Option<String> {
     let _ = tmp.flush();
     let tmp_path = tmp.path().to_path_buf();
 
-    // {1} は fzf の 0-based インデックス、NR は 1-based のため +1 する
-    // \037 は \x1f (Unit Separator) の octal 表記（BSD tr / GNU tr 共通）
-    // パスは POSIX シェルエスケープで囲む（TMPDIR が攻撃者制御下にあっても安全）
-    let preview_cmd = format!(
-        "awk 'NR=={{1}}+1' {} | tr '\\037' '\\n'",
-        posix_shell_quote(&tmp_path.to_string_lossy())
-    );
+    let preview_cmd = build_preview_cmd(&tmp_path.to_string_lossy());
 
     let mut child = Command::new("fzf")
         .args([
@@ -102,6 +96,19 @@ fn display_line(prompt: &str) -> String {
 /// 復元は `tr '\037' '\n'` で行う（BSD / GNU tr 共通の octal エスケープ）。
 fn escape_newlines(prompt: &str) -> String {
     prompt.replace('\n', "\x1f")
+}
+
+/// fzf に渡す preview コマンド文字列を構築する（純粋関数）。
+///
+/// `{1}` は fzf の 0-based インデックスプレースホルダ、awk の `NR` は 1-based のため
+/// `+1` で補正する。`\037` は `\x1f` (Unit Separator) の octal 表記（BSD tr / GNU tr 共通）。
+/// `tmp_path` は POSIX シェルエスケープで囲み、TMPDIR が攻撃者制御下にあっても
+/// コマンドインジェクションを防ぐ。
+fn build_preview_cmd(tmp_path: &str) -> String {
+    format!(
+        "awk 'NR=={{1}}+1' {} | tr '\\037' '\\n'",
+        posix_shell_quote(tmp_path)
+    )
 }
 
 /// POSIX シェルのシングルクォート文字列としてエスケープする。
@@ -192,6 +199,78 @@ mod tests {
         assert_eq!(
             posix_shell_quote("/tmp/path with $space/`cmd`"),
             "'/tmp/path with $space/`cmd`'"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_includes_index_plus_one() {
+        // fzf {1} は 0-based、awk NR は 1-based のため +1 補正が必須。
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("NR=={1}+1"),
+            "0-based → 1-based 補正が欠落: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_quotes_tmp_path() {
+        // パス全体が POSIX シングルクォートで囲まれる（攻撃者制御 TMPDIR 防御）。
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("'/tmp/chp-abc.txt'"),
+            "tmp_path がシェルクォートされていない: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_pipes_through_tr_for_us_to_lf() {
+        // \037 (US) → \n 復元の tr パイプが含まれることを担保する。
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("tr '\\037' '\\n'"),
+            "tr による改行復元パイプが欠落: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_escapes_single_quote_in_path() {
+        // tmp_path にシングルクォートが混入してもインジェクションが起きない。
+        let cmd = build_preview_cmd("/tmp/a';rm -rf /;'b");
+        assert!(
+            cmd.contains(r#"'/tmp/a'\'';rm -rf /;'\''b'"#),
+            "シングルクォートが安全にエスケープされていない: {cmd}"
+        );
+    }
+
+    #[test]
+    fn escape_newlines_roundtrip_via_tr() {
+        // escape_newlines (\n → \x1f) と preview 側復元 (tr '\037' '\n') の
+        // ラウンドトリップが一致することを実プロセスで検証する。
+        // \x1f 以外への置換、tr の引数変更で対称性が崩れたら落ちる。
+        let original = "line1\nline2\nline3\n複数行\nテスト";
+        let escaped = escape_newlines(original);
+        assert!(
+            !escaped.contains('\n'),
+            "escape 後に LF が残っている: {escaped:?}"
+        );
+
+        let mut child = Command::new("tr")
+            .args(["\\037", "\\n"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("tr の起動に失敗");
+        {
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin
+                .write_all(escaped.as_bytes())
+                .expect("stdin write 失敗");
+        }
+        let out = child.wait_with_output().expect("tr wait 失敗");
+        let restored = String::from_utf8(out.stdout).expect("UTF-8 復元失敗");
+        assert_eq!(
+            restored, original,
+            "escape_newlines → tr のラウンドトリップが一致しない"
         );
     }
 }
