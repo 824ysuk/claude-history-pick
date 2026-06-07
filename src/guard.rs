@@ -19,13 +19,20 @@
 //!
 //! ロックファイルの PID が生きていても、プロセス名が
 //! claude-history-pick でなければ kill しない。
+//!
+//! ## アトミックなロック取得
+//!
+//! O_CREAT|O_EXCL（create_new=true）で書き込む。
+//! 競合する 2 インスタンスが同時に「ロックなし」と判定して並走する
+//! TOCTOU を防ぐ。
 
+use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
 use nix::unistd::{getuid, Pid};
-use std::fs;
-use std::io::{Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn lock_path() -> PathBuf {
     PathBuf::from(format!("/tmp/{}.claude-history-pick.lock", getuid()))
@@ -33,18 +40,37 @@ fn lock_path() -> PathBuf {
 
 /// 単一インスタンス権を取得する。
 ///
-/// ロックファイルに記録された先行プロセスが生きていれば
-/// 子プロセス（fzf）ごと終了させてから自 PID を書く。
+/// O_CREAT|O_EXCL でアトミックにロックファイルを生成し TOCTOU を防ぐ。
+/// 既存ロックがある場合は先行プロセスを排除してリトライする。
 pub fn acquire() {
     let path = lock_path();
+    const MAX_RETRIES: u32 = 3;
 
-    if let Some(old_pid) = read_pid(&path) {
-        if is_our_process(old_pid) {
-            evict(old_pid);
-            std::thread::sleep(Duration::from_millis(50));
+    for _ in 0..MAX_RETRIES {
+        match try_write_pid_exclusive(&path) {
+            Ok(()) => return,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                if let Some(old_pid) = read_pid(&path) {
+                    if is_our_process(old_pid) {
+                        evict(old_pid);
+                    } else {
+                        // 死んでいる PID が残っているだけなので上書きできる
+                        let _ = fs::remove_file(&path);
+                    }
+                } else {
+                    // 壊れたロックファイル — 削除して再試行
+                    let _ = fs::remove_file(&path);
+                }
+            }
+            Err(_) => {
+                // AlreadyExists 以外の IO エラーは回復不能 — fallback で通常書き込み
+                write_pid(&path);
+                return;
+            }
         }
     }
 
+    // MAX_RETRIES 回の競合後は通常書き込みで続行
     write_pid(&path);
 }
 
@@ -54,6 +80,14 @@ pub fn acquire() {
 /// 削除失敗は次回起動時の evict() で自動回復するため無視する。
 pub fn release() {
     let _ = fs::remove_file(lock_path());
+}
+
+/// O_CREAT|O_EXCL でアトミックに自 PID を書き込む。
+///
+/// ファイルが既に存在する場合は `ErrorKind::AlreadyExists` を返す。
+fn try_write_pid_exclusive(path: &Path) -> io::Result<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    writeln!(file, "{}", std::process::id())
 }
 
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
@@ -111,6 +145,11 @@ pub fn write_pid_to(path: &Path) {
 }
 
 #[cfg(test)]
+pub fn try_write_pid_exclusive_pub(path: &Path) -> io::Result<()> {
+    try_write_pid_exclusive(path)
+}
+
+#[cfg(test)]
 pub fn is_our_process_pub(pid: libc::pid_t) -> bool {
     is_our_process(pid)
 }
@@ -125,6 +164,14 @@ fn evict(old_pid: libc::pid_t) {
 
     kill(Pid::from_raw(old_pid), Signal::SIGTERM).ok();
 
+    // SIGTERM 後に ncurses 終了処理が完了するまでポーリングで待つ。
+    // 固定 sleep だと fzf の ncurses クリーンアップが 50ms を超えた場合に
+    // 新旧 2 インスタンスがクリップボードを同時操作して二重ペーストが発生する。
+    if !wait_for_death(old_pid, Duration::from_millis(500)) {
+        // タイムアウト: SIGKILL で強制終了
+        kill(Pid::from_raw(old_pid), Signal::SIGKILL).ok();
+    }
+
     // 何が邪魔していたかをユーザーに通知する。
     // ターミナルは hide: on_success で消えるため macOS 通知を使う。
     std::process::Command::new("osascript")
@@ -138,6 +185,26 @@ fn evict(old_pid: libc::pid_t) {
         ])
         .status()
         .ok();
+}
+
+/// プロセスの死亡をポーリングで確認する。
+///
+/// `kill(pid, 0)` は ESRCH でプロセス消滅を検知する（シグナルを送らない）。
+/// 20ms ごとに確認し、`timeout` 以内に消滅すれば true を返す。
+fn wait_for_death(pid: libc::pid_t, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        match kill(Pid::from_raw(pid), None) {
+            Err(Errno::ESRCH) => return true, // プロセスが消滅
+            _ => std::thread::sleep(Duration::from_millis(20)),
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+pub fn wait_for_death_pub(pid: libc::pid_t, timeout: Duration) -> bool {
+    wait_for_death(pid, timeout)
 }
 
 #[cfg(test)]
@@ -166,6 +233,56 @@ mod tests {
         writeln!(tmp, "not-a-pid").unwrap();
         assert!(read_pid_from(tmp.path()).is_none());
         // tmp が Drop するとファイルは自動削除される
+    }
+
+    #[test]
+    fn try_write_pid_exclusive_fails_when_file_exists() {
+        // O_CREAT|O_EXCL: 既存ファイルに対して AlreadyExists を返すことを検証する。
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let err = try_write_pid_exclusive_pub(tmp.path()).expect_err("既存ファイルで Ok を返した");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::AlreadyExists,
+            "AlreadyExists 以外のエラーを返した: {err}"
+        );
+    }
+
+    #[test]
+    fn try_write_pid_exclusive_succeeds_on_new_file() {
+        // 存在しないパスに対して Ok を返し、自 PID が書き込まれることを検証する。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.lock");
+        try_write_pid_exclusive_pub(&path).expect("新規ファイルで失敗した");
+        let pid = read_pid_from(&path).expect("PID が読めない");
+        assert_eq!(pid, std::process::id() as libc::pid_t);
+    }
+
+    #[test]
+    fn wait_for_death_returns_true_for_dead_pid() {
+        // すでに死んでいる PID に対して即 true を返すことを検証する。
+        // 999_999 は macOS では通常存在しない PID。
+        let dead_pid = 999_999_i32;
+        assert!(
+            wait_for_death_pub(dead_pid, Duration::from_millis(100)),
+            "死んでいる PID で false を返した"
+        );
+    }
+
+    #[test]
+    fn wait_for_death_returns_false_on_timeout_for_live_process() {
+        // 生きているプロセスに対して timeout まで待って false を返すことを検証する。
+        // sleep コマンドを起動して即 reap する（zombie にしない）。
+        let child = std::process::Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("sleep を起動できない");
+        let pid = child.id() as libc::pid_t;
+        // 短いタイムアウトで false が返ること（生きているため）
+        let result = wait_for_death_pub(pid, Duration::from_millis(60));
+        // 後始末: SIGKILL して reap
+        kill(Pid::from_raw(pid), Signal::SIGKILL).ok();
+        drop(child); // wait せず drop（zombie は OS が回収）
+        assert!(!result, "生きているプロセスで true を返した");
     }
 
     #[test]
