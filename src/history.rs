@@ -20,7 +20,8 @@ struct HistoryEntry {
 ///
 /// フィルタ条件:
 /// - `display` フィールドが存在し、空でない行のみ採用
-/// - '/' 始まりのスラッシュコマンド（`/help` 等）を除外
+/// - 引数なしスラッシュコマンド（`/help` 等、空白を含まない '/' 始まり）を除外。
+///   引数付き（`/loop 5m /foo` 等）は再利用価値が高いため採用する
 /// - 重複エントリは先出順で除去（awk '!seen[$0]++' の Rust 等価）
 ///
 /// JSON パース失敗行はスキップし、ファイル全体の読み込みは続行する。
@@ -36,6 +37,17 @@ pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<String>> {
 fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<String>> {
     let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
     Ok(collect_prompts(lines.into_iter()))
+}
+
+/// 引数なしスラッシュコマンドか判定する。
+///
+/// `/help` や `/clear` のような単独コマンドは Claude Code 内で `/` キーから
+/// メニュー選択できるため fzf に出す価値が低く除外する。一方で `/loop 5m /foo`
+/// のような引数付きは手入力が長く再利用価値が高いため採用する。
+///
+/// 判定基準: '/' 始まり かつ ASCII 空白文字を含まない。
+fn is_bare_slash_command(s: &str) -> bool {
+    s.starts_with('/') && !s.chars().any(|c| c.is_ascii_whitespace())
 }
 
 /// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
@@ -58,7 +70,7 @@ pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
 
         if let Some(display) = entry.display {
             let display = display.trim().to_string();
-            if display.is_empty() || display.starts_with('/') {
+            if display.is_empty() || is_bare_slash_command(&display) {
                 continue;
             }
             if seen.insert(display.clone()) {
@@ -141,11 +153,29 @@ mod tests {
     }
 
     #[test]
-    fn slash_command_is_excluded() {
+    fn bare_slash_command_is_excluded() {
         let input = r#"{"display":"/help"}
 {"display":"通常のプロンプト"}"#;
         let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["通常のプロンプト"]);
+    }
+
+    #[test]
+    fn slash_command_with_args_is_included() {
+        // 引数付き（`/loop 5m /foo` 等）は手入力が長く再利用価値が高いため採用する。
+        let input = r#"{"display":"/loop 5m /foo"}
+{"display":"/code-review --comment"}
+{"display":"/help"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["/code-review --comment", "/loop 5m /foo"]);
+    }
+
+    #[test]
+    fn slash_command_with_tab_is_included() {
+        // ASCII 空白には tab も含まれる。tab 区切りも引数付きとして採用する。
+        let input = "{\"display\":\"/foo\\tbar\"}";
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["/foo\tbar"]);
     }
 
     #[test]
