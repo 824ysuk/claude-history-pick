@@ -90,7 +90,15 @@ fn main() {
     // injector が fork するため、ロックは fork 前に解放する。
     // daemon は main process 終了後も動くが、次の ctrl-; r を妨げない。
     guard::release();
-    injector::inject_keystroke_after_delay(PASTE_DELAY);
+    if let Err(e) = injector::inject_keystroke_after_delay(PASTE_DELAY) {
+        // setsid() / spawn() 失敗時。クリップボードへのコピーは成功しているため、
+        // 「自動貼り付けが効かなかったが内容はコピー済み」であることを伝達する。
+        eprintln!("osascript の起動に失敗しました: {e}");
+        eprintln!(
+            "選択したプロンプトはクリップボードにコピー済みです。Zed の入力欄に手動で cmd-r または cmd-v で貼り付けてください。"
+        );
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]

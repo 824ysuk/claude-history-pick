@@ -67,7 +67,12 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
 /// `initial_delay` はタスクターミナルが閉じ始めるのを待つ最小時間。
 /// その後 AppleScript のポーリングで Zed が前面になるまで待機するため、
 /// 固定 sleep によるレースコンディションが発生しない。
-pub fn inject_keystroke_after_delay(initial_delay: Duration) {
+///
+/// `setsid()` が EPERM 等で失敗した場合、または `spawn()` 自体が失敗した場合は
+/// `Err` を返す。setsid() 失敗時は SIGTERM 保護が成立せず Zed のターミナル終了で
+/// osascript が一緒に殺されて貼り付けが黙って失敗するため、サイレント化させず
+/// 呼び出し側で fallback メッセージを出させる。
+pub fn inject_keystroke_after_delay(initial_delay: Duration) -> std::io::Result<()> {
     let mut cmd = Command::new("osascript");
     for line in build_script_args(initial_delay) {
         cmd.arg("-e").arg(line);
@@ -78,15 +83,23 @@ pub fn inject_keystroke_after_delay(initial_delay: Duration) {
 
     // fork 後の子プロセスで setsid() を呼び、Zed の SIGTERM から切り離す。
     // pre_exec は fork 後・exec 前に子プロセスで実行される。
-    // setsid() は POSIX async-signal-safe 関数のためここで呼ぶのは安全。
+    // setsid() / errno 読み取り / Error::from_raw_os_error は async-signal-safe
+    // （heap 割り当てなし）のためここで呼ぶのは安全。
+    //
+    // setsid() は呼び出し元がプロセスグループリーダー (PID == PGID) の場合 EPERM で
+    // -1 を返す。戻り値を捨てると失敗を検知できず、Zed の SIGTERM が osascript に
+    // 届いて貼り付けが黙って失敗する。
     unsafe {
         cmd.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
 
-    cmd.spawn().ok();
+    cmd.spawn()?;
+    Ok(())
 }
 
 #[cfg(test)]
