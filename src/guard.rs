@@ -94,8 +94,7 @@ fn is_our_process(pid: libc::pid_t) -> bool {
             let comm = String::from_utf8_lossy(&out.stdout);
             let comm = comm.trim();
             // PATH 経由起動: comm はベア名。フルパス起動: comm はフルパス。両方を許容する。
-            comm == exe_basename.as_ref()
-                || comm.ends_with(&format!("/{exe_basename}"))
+            comm == exe_basename.as_ref() || comm.ends_with(&format!("/{exe_basename}"))
         })
         .unwrap_or(false)
 }
