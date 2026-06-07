@@ -20,7 +20,9 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
 
     let status = child.wait()?;
     if !status.success() {
-        return Err(std::io::Error::other(format!("pbcopy exited with {status}")));
+        return Err(std::io::Error::other(format!(
+            "pbcopy exited with {status}"
+        )));
     }
     Ok(())
 }
