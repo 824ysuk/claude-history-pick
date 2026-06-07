@@ -67,8 +67,20 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
 /// `initial_delay` はタスクターミナルが閉じ始めるのを待つ最小時間。
 /// その後 AppleScript のポーリングで Zed が前面になるまで待機するため、
 /// 固定 sleep によるレースコンディションが発生しない。
-pub fn inject_keystroke_after_delay(initial_delay: Duration) {
-    let mut cmd = Command::new("osascript");
+///
+/// `setsid()` が EPERM 等で失敗した場合、または `spawn()` 自体が失敗した場合は
+/// `Err` を返す。setsid() 失敗時は SIGTERM 保護が成立せず Zed のターミナル終了で
+/// osascript が一緒に殺されて貼り付けが黙って失敗するため、サイレント化させず
+/// 呼び出し側で fallback メッセージを出させる。
+pub fn inject_keystroke_after_delay(initial_delay: Duration) -> std::io::Result<()> {
+    spawn_injector_with_program("osascript", initial_delay)
+}
+
+/// `inject_keystroke_after_delay` の本体。program を差し替えられるよう分離している
+/// のは、setsid + spawn の Result 経路を `osascript` (実機 Zed 必要) に依存せず
+/// テストするため (`/usr/bin/true` 等で正常パスを確認する)。
+fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::io::Result<()> {
+    let mut cmd = Command::new(program);
     for line in build_script_args(initial_delay) {
         cmd.arg("-e").arg(line);
     }
@@ -78,15 +90,23 @@ pub fn inject_keystroke_after_delay(initial_delay: Duration) {
 
     // fork 後の子プロセスで setsid() を呼び、Zed の SIGTERM から切り離す。
     // pre_exec は fork 後・exec 前に子プロセスで実行される。
-    // setsid() は POSIX async-signal-safe 関数のためここで呼ぶのは安全。
+    // setsid() / errno 読み取り / Error::from_raw_os_error は async-signal-safe
+    // （heap 割り当てなし）のためここで呼ぶのは安全。
+    //
+    // setsid() は呼び出し元がプロセスグループリーダー (PID == PGID) の場合 EPERM で
+    // -1 を返す。戻り値を捨てると失敗を検知できず、Zed の SIGTERM が osascript に
+    // 届いて貼り付けが黙って失敗する。
     unsafe {
         cmd.pre_exec(|| {
-            libc::setsid();
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
             Ok(())
         });
     }
 
-    cmd.spawn().ok();
+    cmd.spawn()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -169,6 +189,27 @@ mod tests {
             args.iter().any(|s| s == "delay 0.05"),
             "ポーリング間隔 (delay 0.05) 行が見つからない: {args:?}"
         );
+    }
+
+    #[test]
+    fn spawn_injector_with_existing_program_returns_ok() {
+        // 正常パス回帰検出。`/usr/bin/true` は引数を無視して exit 0 するため
+        // 副作用なく setsid + pre_exec + spawn の Result 経路を通せる。
+        // この test が落ちる = inject_keystroke_after_delay の Err 化リファクタが
+        // 通常呼び出しを壊した、と一発で分かる。
+        let result = spawn_injector_with_program("/usr/bin/true", Duration::from_millis(0));
+        assert!(result.is_ok(), "正常パスが Err を返した: {result:?}");
+    }
+
+    #[test]
+    fn spawn_injector_with_missing_program_returns_err() {
+        // spawn() 失敗が呼び出し側に伝搬することを担保。`?` を消してしまうと
+        // この test が落ちる。
+        let result = spawn_injector_with_program(
+            "/nonexistent/binary/claude-history-pick-test",
+            Duration::from_millis(0),
+        );
+        assert!(result.is_err(), "存在しない binary でも Ok を返した");
     }
 
     #[test]
