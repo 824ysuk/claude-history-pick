@@ -18,7 +18,12 @@ pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
         // stdin drop → pbcopy に EOF が届きコピー完了
     }
 
-    child.wait()?;
+    let status = child.wait()?;
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "pbcopy exited with {status}"
+        )));
+    }
     Ok(())
 }
 
