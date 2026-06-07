@@ -39,48 +39,64 @@ fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<String
     Ok(collect_prompts(lines.into_iter()))
 }
 
-/// 引数なしスラッシュコマンドか判定する。
+/// JSONL 1 行から表示用テキスト（`display` フィールド）を取り出す。
 ///
-/// `/help` や `/clear` のような単独コマンドは Claude Code 内で `/` キーから
-/// メニュー選択できるため fzf に出す価値が低く除外する。一方で `/loop 5m /foo`
-/// のような引数付きは手入力が長く再利用価値が高いため採用する。
+/// 空行・JSON パース失敗・`display` 欠落・空文字列はすべて `None` を返す。
+/// 上流で `filter_map` に渡すことを想定。
+fn parse_display(line: &str) -> Option<String> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let entry: HistoryEntry = serde_json::from_str(line).ok()?;
+    let display = entry.display?.trim().to_string();
+    if display.is_empty() {
+        None
+    } else {
+        Some(display)
+    }
+}
+
+/// fzf 表示候補として採用すべきプロンプトか判定する。
 ///
-/// 判定基準: '/' 始まり かつ ASCII 空白文字を含まない。
+/// 除外条件:
+/// - 引数なしスラッシュコマンド（`/help` `/clear` 等）: Claude Code 内で `/`
+///   キーからメニュー選択できるため fzf に出す価値が低い。
+///   引数付き（`/loop 5m /foo` 等）は手入力が長く再利用価値が高いため採用する。
+fn is_eligible(display: &str) -> bool {
+    !is_bare_slash_command(display)
+}
+
+/// 引数なしスラッシュコマンド判定: '/' 始まり かつ ASCII 空白を含まない。
 fn is_bare_slash_command(s: &str) -> bool {
     s.starts_with('/') && !s.chars().any(|c| c.is_ascii_whitespace())
 }
 
-/// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
+/// 最新出現を優先して重複除去する（fzf の体感に合わせ末尾優先）。
 ///
-/// 行単位のパース失敗はスキップして続行する。ファイル I/O を伴わないため
-/// 失敗しない。返り値を Result にしないことでその事実を型で表現する。
-pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
-    let mut prompts = Vec::new();
+/// 入力は時系列（古い→新しい）を想定。同一文字列は最後の出現位置だけ残し、
+/// 新しい順（新→古）に並び替えて返す。
+fn dedup_keep_last(prompts: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
-
-    for line in lines {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let entry: HistoryEntry = match serde_json::from_str(&line) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        if let Some(display) = entry.display {
-            let display = display.trim().to_string();
-            if display.is_empty() || is_bare_slash_command(&display) {
-                continue;
-            }
-            if seen.insert(display.clone()) {
-                prompts.push(display);
-            }
+    let mut result = Vec::with_capacity(prompts.len());
+    for p in prompts.into_iter().rev() {
+        if seen.insert(p.clone()) {
+            result.push(p);
         }
     }
+    result
+}
 
-    prompts.reverse();
-    prompts
+/// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
+///
+/// 構成: parse → filter → dedup の 3 段。各段はファイル内の private 関数として
+/// 単独で意味を持つ。ファイル I/O を伴わないため失敗しない（返り値を Result に
+/// しないことでその事実を型で表現する）。
+pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<String> {
+    let eligible: Vec<String> = lines
+        .filter_map(|l| parse_display(&l))
+        .filter(|d| is_eligible(d))
+        .collect();
+    dedup_keep_last(eligible)
 }
 
 #[cfg(test)]
