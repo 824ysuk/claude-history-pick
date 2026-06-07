@@ -20,8 +20,9 @@ struct HistoryEntry {
 ///
 /// フィルタ条件:
 /// - `display` フィールドが存在し、空でない行のみ採用
-/// - 引数なしスラッシュコマンド（`/help` 等、空白を含まない '/' 始まり）を除外。
-///   引数付き（`/loop 5m /foo` 等）は再利用価値が高いため採用する
+/// - 単独スラッシュコマンド形式（`/help` `/code-review` 等、`/` + 英数/ハイフン/
+///   アンダースコアのみ）を除外。引数や記号を伴うもの（`/loop 5m /foo` `/foo:bar`）
+///   は再利用価値が高いため採用する
 /// - 重複エントリは先出順で除去（awk '!seen[$0]++' の Rust 等価）
 ///
 /// JSON パース失敗行はスキップし、ファイル全体の読み込みは続行する。
@@ -59,16 +60,26 @@ fn parse_display(line: &str) -> Option<String> {
 /// fzf 表示候補として採用すべきプロンプトか判定する。
 ///
 /// 除外条件:
-/// - 引数なしスラッシュコマンド（`/help` `/clear` 等）: Claude Code 内で `/`
-///   キーからメニュー選択できるため fzf に出す価値が低い。
-///   引数付き（`/loop 5m /foo` 等）は手入力が長く再利用価値が高いため採用する。
+/// - 単独スラッシュコマンド形式（`/help` `/code-review` 等）: Claude Code 内
+///   で `/` キーからメニュー選択できるため fzf に出す価値が低い。
+///   引数や記号を伴うもの（`/loop 5m /foo` `/foo:bar` 等）は手入力が長く
+///   再利用価値が高いため採用する。
 fn is_eligible(display: &str) -> bool {
     !is_bare_slash_command(display)
 }
 
-/// 引数なしスラッシュコマンド判定: '/' 始まり かつ ASCII 空白を含まない。
+/// 単独スラッシュコマンド判定: `/` + 英数/ハイフン/アンダースコアのみ。
+///
+/// Claude Code の slash command 名は ASCII 英数 + `-` + `_` で構成される。
+/// この形式に完全一致するものは内蔵 `/` メニューで補えるため fzf 候補から
+/// 除外する。判定軸を「空白の有無」ではなく「単独 slash 形式か」に置くこ
+/// とで、Unicode 空白混入（`/foo　bar`）や記号区切り（`/foo:bar`）など
+/// 「文字列として価値のある」ケースも自然に採用側に倒れる。
 fn is_bare_slash_command(s: &str) -> bool {
-    s.starts_with('/') && !s.chars().any(|c| c.is_ascii_whitespace())
+    let Some(name) = s.strip_prefix('/') else {
+        return false;
+    };
+    !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// 最新出現を優先して重複除去する（fzf の体感に合わせ末尾優先）。
@@ -188,10 +199,45 @@ mod tests {
 
     #[test]
     fn slash_command_with_tab_is_included() {
-        // ASCII 空白には tab も含まれる。tab 区切りも引数付きとして採用する。
+        // tab を含む slash command は単独形でないため採用する。
         let input = "{\"display\":\"/foo\\tbar\"}";
         let result = collect_prompts(lines(input));
         assert_eq!(result, vec!["/foo\tbar"]);
+    }
+
+    #[test]
+    fn slash_command_with_fullwidth_space_is_included() {
+        // 全角スペース (U+3000) 混入の slash command は単独形でないため採用する。
+        let input = "{\"display\":\"/loop　5m\"}";
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["/loop\u{3000}5m"]);
+    }
+
+    #[test]
+    fn slash_command_with_symbol_separator_is_included() {
+        // 記号区切り（`:` `;` `|` `=` 等）も単独形でないため採用する。
+        let input = r#"{"display":"/foo:bar"}
+{"display":"/foo=v"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["/foo=v", "/foo:bar"]);
+    }
+
+    #[test]
+    fn slash_command_with_hyphen_only_is_excluded() {
+        // `/code-review` 等のハイフン含む単独形は除外（Claude Code 内 `/`
+        // メニューで補える）。
+        let input = r#"{"display":"/code-review"}
+{"display":"通常のプロンプト"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["通常のプロンプト"]);
+    }
+
+    #[test]
+    fn lone_slash_is_not_treated_as_bare_command() {
+        // `/` 単独は slash command 名がないため bare 扱いしない（採用）。
+        let input = r#"{"display":"/"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result, vec!["/"]);
     }
 
     #[test]
