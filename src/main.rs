@@ -26,8 +26,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// タスクターミナルが閉じ始めるのを待つ最小時間。
-/// この後 AppleScript のポーリングで Zed が前面に来るまで待機するため、
-/// 固定値への依存は排除されている。
+///
+/// この後 injector の AppleScript が「Zed 前面化」を確認するまで最大 40×50ms = 2 秒
+/// ポーリングする。この定数はポーリング開始までの最低保証時間であり、
+/// ポーリング継続時間とは直交する。値を変えるなら injector の polling 定数と合わせて検討する。
 const PASTE_DELAY: Duration = Duration::from_millis(100);
 
 /// 履歴ファイルのパスを解決する。

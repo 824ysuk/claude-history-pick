@@ -46,9 +46,26 @@ struct HistoryEntry {
 /// 持つ現行形式は ISO 8601 相当のローカル時刻文字列に変換する。
 #[derive(Debug)]
 pub struct Prompt {
-    pub display: String,
-    pub full_text: String,
-    pub iso_timestamp: Option<String>,
+    pub(crate) display: String,
+    pub(crate) full_text: String,
+    pub(crate) iso_timestamp: Option<String>,
+}
+
+impl Prompt {
+    /// fzf リスト表示用テキスト（`[Pasted text #N ...]` プレースホルダ形式を維持）。
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    /// クリップボード・プレビューパネル用テキスト（ペーストキャッシュを展開済み）。
+    pub fn full_text(&self) -> &str {
+        &self.full_text
+    }
+
+    /// 記録時刻のローカル ISO 文字列。`timestamp`/`isoTimestamp` なしの場合は `None`。
+    pub fn timestamp(&self) -> Option<&str> {
+        self.iso_timestamp.as_deref()
+    }
 }
 
 /// `history_path` の JSONL を読み込み、表示用プロンプト一覧を返す。

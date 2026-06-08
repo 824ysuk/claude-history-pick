@@ -25,8 +25,8 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     // 予測可能パスによる symlink attack を防げる。NamedTempFile は Drop で自動削除。
     let mut tmp = NamedTempFile::new().ok()?;
     for prompt in prompts {
-        let ts = prompt.iso_timestamp.as_deref().unwrap_or("");
-        let _ = writeln!(tmp, "{}\t{}", escape_newlines(&prompt.full_text), ts);
+        let ts = prompt.timestamp().unwrap_or("");
+        let _ = writeln!(tmp, "{}\t{}", escape_newlines(prompt.full_text()), ts);
     }
     let _ = tmp.flush();
     let tmp_path = tmp.path().to_path_buf();
@@ -61,7 +61,7 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     // stdin に "{index}\t{display_line}" を 1 行ずつ書き込む
     if let Some(mut stdin) = child.stdin.take() {
         for (i, prompt) in prompts.iter().enumerate() {
-            let _ = writeln!(stdin, "{}\t{}", i, display_line(&prompt.display));
+            let _ = writeln!(stdin, "{}\t{}", i, display_line(prompt.display()));
         }
         // stdin を drop することで fzf 側の EOF が発生し、候補リストが確定する
     }
@@ -76,7 +76,7 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
         }
         // fzf は --with-nth でも行全体を返すため "{index}\t{display}" をパース
         let idx: usize = trimmed.split('\t').next()?.parse().ok()?;
-        prompts.get(idx).map(|p| p.full_text.clone())
+        prompts.get(idx).map(|p| p.full_text().to_string())
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None
