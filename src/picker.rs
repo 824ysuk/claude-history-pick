@@ -313,11 +313,8 @@ mod tests {
 
     #[test]
     fn make_prompt_with_full_text_stores_distinct_values() {
-        let p = make_prompt_with_full_text(
-            "[Pasted text #1 +3 lines]",
-            "line1\nline2\nline3",
-            None,
-        );
+        let p =
+            make_prompt_with_full_text("[Pasted text #1 +3 lines]", "line1\nline2\nline3", None);
         assert_eq!(p.display, "[Pasted text #1 +3 lines]");
         assert_eq!(p.full_text, "line1\nline2\nline3");
     }
@@ -352,11 +349,8 @@ mod tests {
     #[test]
     fn display_line_of_full_text_returns_first_line() {
         // full_text が複数行でも display_line は先頭行のみ返す。
-        let p = make_prompt_with_full_text(
-            "[Pasted text #1 +3 lines]",
-            "line1\nline2\nline3",
-            None,
-        );
+        let p =
+            make_prompt_with_full_text("[Pasted text #1 +3 lines]", "line1\nline2\nline3", None);
         assert_eq!(display_line(&p.full_text), "line1");
     }
 }

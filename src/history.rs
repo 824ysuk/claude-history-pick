@@ -86,7 +86,10 @@ fn load_prompts_from_reader_with_cache<R: BufRead>(
     paste_cache_dir: &Path,
 ) -> std::io::Result<Vec<Prompt>> {
     let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
-    Ok(collect_prompts_with_cache(lines.into_iter(), paste_cache_dir))
+    Ok(collect_prompts_with_cache(
+        lines.into_iter(),
+        paste_cache_dir,
+    ))
 }
 
 /// Unix ミリ秒タイムスタンプをローカル時刻の ISO 8601 形式文字列に変換する。
@@ -336,7 +339,10 @@ mod tests {
             "timestamp フィールドが iso_timestamp に変換されるべき"
         );
         let ts = result[0].iso_timestamp.as_ref().unwrap();
-        assert!(ts.contains("2026"), "2026 年のタイムスタンプになるべき: {ts}");
+        assert!(
+            ts.contains("2026"),
+            "2026 年のタイムスタンプになるべき: {ts}"
+        );
     }
 
     #[test]
@@ -377,13 +383,11 @@ mod tests {
         );
         let prompts = collect_prompts_with_cache(std::iter::once(input), dir.path());
         assert_eq!(
-            prompts[0].display,
-            "before [Pasted text #1 +1 lines] after",
+            prompts[0].display, "before [Pasted text #1 +1 lines] after",
             "display はプレースホルダのまま保持する"
         );
         assert_eq!(
-            prompts[0].full_text,
-            "before actual content after",
+            prompts[0].full_text, "before actual content after",
             "full_text はキャッシュ内容に展開する"
         );
     }
@@ -411,11 +415,9 @@ mod tests {
         // キャッシュファイルが存在しない場合は display をそのまま full_text にする。
         let dir = tempfile::TempDir::new().unwrap();
         let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"nonexistent_hash"}}}"#;
-        let prompts =
-            collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
         assert_eq!(
-            prompts[0].full_text,
-            "before [Pasted text #1 +1 lines] after",
+            prompts[0].full_text, "before [Pasted text #1 +1 lines] after",
             "キャッシュ欠落時は display をそのまま使う"
         );
     }
@@ -565,8 +567,7 @@ mod tests {
     #[test]
     fn collect_prompts_full_text_always_equals_display() {
         // cache なし版では full_text は展開されず display と一致する。
-        let input =
-            r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
         let result = collect_prompts(lines(input));
         assert_eq!(result[0].full_text, result[0].display);
     }
@@ -617,8 +618,7 @@ mod tests {
         );
         assert_eq!(prompts.len(), 1, "重複は 1 件に圧縮される");
         assert_eq!(
-            prompts[0].full_text,
-            "NEW_CONTENT",
+            prompts[0].full_text, "NEW_CONTENT",
             "最新エントリの full_text が保持される"
         );
     }
