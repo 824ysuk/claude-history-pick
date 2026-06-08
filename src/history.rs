@@ -76,6 +76,7 @@ pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<Prompt>> {
 }
 
 /// `BufRead` から JSONL を読み込む。paste-cache 展開なし（テスト用）。
+#[cfg(test)]
 fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<Prompt>> {
     load_prompts_from_reader_with_cache(reader, Path::new(""))
 }
@@ -221,6 +222,7 @@ fn dedup_keep_last(prompts: Vec<Prompt>) -> Vec<Prompt> {
 /// JSONL 行イテレータからプロンプトを収集する（paste-cache 展開なし・テスト用）。
 ///
 /// 構成: parse → filter → dedup の 3 段。ファイル I/O を伴わないため失敗しない。
+#[cfg(test)]
 pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<Prompt> {
     collect_prompts_with_cache(lines, Path::new(""))
 }
