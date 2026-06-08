@@ -26,8 +26,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 /// タスクターミナルが閉じ始めるのを待つ最小時間。
-/// この後 AppleScript のポーリングで Zed が前面に来るまで待機するため、
-/// 固定値への依存は排除されている。
+///
+/// この後 injector の AppleScript が「Zed 前面化」を確認するまで最大 40×50ms = 2 秒
+/// ポーリングする。この定数はポーリング開始までの最低保証時間であり、
+/// ポーリング継続時間とは直交する。値を変えるなら injector の polling 定数と合わせて検討する。
 const PASTE_DELAY: Duration = Duration::from_millis(100);
 
 /// 履歴ファイルのパスを解決する。
@@ -160,5 +162,31 @@ mod tests {
         std::env::remove_var("CLAUDE_HISTORY_PATH");
         assert_eq!(path, PathBuf::from(""));
         assert!(from_env_var);
+    }
+
+    // ─── クロスセッション可視性の根拠: CWD に依存しない HOME-relative パス ───
+
+    #[test]
+    fn history_path_is_home_relative_not_cwd_relative() {
+        // 「どの terminal から起動しても同じ history.jsonl を読む」保証の根拠。
+        // resolve_history_path() は CWD に依存せず HOME/.claude/history.jsonl を返す。
+        // dotfiles worktree / 別 repo / 直接起動 — いずれも同一ファイルを指す。
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("CLAUDE_HISTORY_PATH");
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let expected = PathBuf::from(&home).join(".claude/history.jsonl");
+
+        // CWD を一時的に /tmp に変えて呼び出す
+        let original_cwd = std::env::current_dir().ok();
+        let _ = std::env::set_current_dir("/tmp");
+        let (path_from_tmp, _) = resolve_history_path();
+        if let Some(cwd) = original_cwd {
+            let _ = std::env::set_current_dir(cwd);
+        }
+
+        assert_eq!(
+            path_from_tmp, expected,
+            "CWD が /tmp でも ~/.claude/history.jsonl を指すべき"
+        );
     }
 }

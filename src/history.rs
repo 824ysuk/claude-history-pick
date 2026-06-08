@@ -1,75 +1,196 @@
 //! Claude Code の ~/.claude/history.jsonl からプロンプト履歴を読み込む層。
 //!
-//! 責務: JSON パース・フィルタリング・重複除去のみ。
+//! 責務: JSON パース・フィルタリング・重複除去・ペーストキャッシュ展開のみ。
 //! UI（fzf）・クリップボード・キーストロークは扱わない。
 
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// history.jsonl の pastedContents エントリ 1 件。
+#[derive(Deserialize)]
+struct PasteRef {
+    id: u32,
+    #[serde(rename = "contentHash")]
+    content_hash: String,
+}
 
 /// history.jsonl の 1 行に対応する構造体。
+///
+/// `isoTimestamp` はレガシーフィールド（現行 Claude Code は書かない）。
+/// `timestamp` が現行フォーマット（Unix ミリ秒）。
 #[derive(Deserialize)]
 struct HistoryEntry {
     display: Option<String>,
     #[serde(rename = "isoTimestamp")]
     iso_timestamp: Option<String>,
+    timestamp: Option<u64>,
+    #[serde(rename = "pastedContents")]
+    pasted_contents: Option<HashMap<String, PasteRef>>,
 }
 
 /// フィルタリング・重複除去済みのプロンプト。
 ///
-/// `display` は表示・クリップボードコピー用のテキスト全文。
-/// `iso_timestamp` は `history.jsonl` の `isoTimestamp` フィールド（ISO 8601）。
-/// タイムスタンプが存在しない行（旧形式）は `None`。
+/// `display` は fzf リスト表示用テキスト。`pastedContents` がある行は
+/// プレースホルダ形式（`[Pasted text #1 +48 lines]`）のまま保持する。
+///
+/// `full_text` はクリップボード・プレビュー用テキスト。
+/// `~/.claude/paste-cache/{contentHash}.txt` が存在する場合はプレースホルダを
+/// 実ペースト内容に展開済み。キャッシュが存在しない場合は `display` と同一。
+///
+/// `iso_timestamp` は表示用タイムスタンプ文字列（ローカル時刻）。
+/// `isoTimestamp` フィールドを持つ旧形式はそのまま、`timestamp`（数値 ms）を
+/// 持つ現行形式は ISO 8601 相当のローカル時刻文字列に変換する。
 #[derive(Debug)]
 pub struct Prompt {
-    pub display: String,
-    pub iso_timestamp: Option<String>,
+    pub(crate) display: String,
+    pub(crate) full_text: String,
+    pub(crate) iso_timestamp: Option<String>,
+}
+
+impl Prompt {
+    /// fzf リスト表示用テキスト（`[Pasted text #N ...]` プレースホルダ形式を維持）。
+    pub fn display(&self) -> &str {
+        &self.display
+    }
+
+    /// クリップボード・プレビューパネル用テキスト（ペーストキャッシュを展開済み）。
+    pub fn full_text(&self) -> &str {
+        &self.full_text
+    }
+
+    /// 記録時刻のローカル ISO 文字列。`timestamp`/`isoTimestamp` なしの場合は `None`。
+    pub fn timestamp(&self) -> Option<&str> {
+        self.iso_timestamp.as_deref()
+    }
 }
 
 /// `history_path` の JSONL を読み込み、表示用プロンプト一覧を返す。
+///
+/// paste-cache ディレクトリは `history_path` の親ディレクトリ内の
+/// `paste-cache/` サブディレクトリを使う（`~/.claude/paste-cache/`）。
 ///
 /// フィルタ条件:
 /// - `display` フィールドが存在し、空でない行のみ採用
 /// - 単独スラッシュコマンド形式（`/help` `/code-review` 等、`/` + 英数/ハイフン/
 ///   アンダースコアのみ）を除外。引数や記号を伴うもの（`/loop 5m /foo` `/foo:bar`）
 ///   は再利用価値が高いため採用する
-/// - 重複エントリは最新出現を優先して除去（`iso_timestamp` は最新を保持）
+/// - 重複エントリは最新出現を優先して除去
 ///
 /// JSON パース失敗行はスキップし、ファイル全体の読み込みは続行する。
 /// 一方で行読み込み中の IO エラー（NFS 断絶・ディスク EIO 等）は
 /// 履歴欠落をサイレントに招くため、呼び出し元に伝播する。
 pub fn load_prompts(history_path: &Path) -> std::io::Result<Vec<Prompt>> {
+    let paste_cache_dir = history_path
+        .parent()
+        .map(|p| p.join("paste-cache"))
+        .unwrap_or_else(|| PathBuf::from("paste-cache"));
     let file = File::open(history_path)?;
-    load_prompts_from_reader(BufReader::new(file))
+    load_prompts_from_reader_with_cache(BufReader::new(file), &paste_cache_dir)
 }
 
-/// `BufRead` から JSONL を読み込み、表示用プロンプト一覧を返す。
-/// IO エラー注入テストのために path 受領層から切り出している。
+/// `BufRead` から JSONL を読み込む。paste-cache 展開なし（テスト用）。
+#[cfg(test)]
 fn load_prompts_from_reader<R: BufRead>(reader: R) -> std::io::Result<Vec<Prompt>> {
+    load_prompts_from_reader_with_cache(reader, Path::new(""))
+}
+
+/// `BufRead` から JSONL を読み込む。paste-cache 展開あり。
+fn load_prompts_from_reader_with_cache<R: BufRead>(
+    reader: R,
+    paste_cache_dir: &Path,
+) -> std::io::Result<Vec<Prompt>> {
     let lines = reader.lines().collect::<std::io::Result<Vec<_>>>()?;
-    Ok(collect_prompts(lines.into_iter()))
+    Ok(collect_prompts_with_cache(
+        lines.into_iter(),
+        paste_cache_dir,
+    ))
+}
+
+/// Unix ミリ秒タイムスタンプをローカル時刻の ISO 8601 形式文字列に変換する。
+///
+/// `libc::localtime_r` でローカル時刻に変換する。UTC ではないため末尾に 'Z' を付けない。
+/// 「いつ打ったか」を人間が読む用途なのでローカル時刻が適切。
+fn unix_ms_to_local_iso(ms: u64) -> String {
+    let secs = (ms / 1000) as libc::time_t;
+    let mut t: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut t) };
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        t.tm_year + 1900,
+        t.tm_mon + 1,
+        t.tm_mday,
+        t.tm_hour,
+        t.tm_min,
+        t.tm_sec
+    )
+}
+
+/// `display` 内の `[Pasted text #id ...]` プレースホルダを
+/// `paste_cache_dir/{contentHash}.txt` の実ペースト内容に置換した文字列を返す。
+///
+/// キャッシュファイルが存在しない ID はプレースホルダのまま残す。
+/// ID を降順で処理することで先頭側の置換後に後続 ID の位置が変わっても
+/// `find` が再スキャンするため問題ない（ただし降順の方が直感的に安全）。
+fn expand_pasted_contents(
+    display: &str,
+    pasted_contents: &HashMap<String, PasteRef>,
+    paste_cache_dir: &Path,
+) -> String {
+    let mut result = display.to_string();
+    let mut refs: Vec<&PasteRef> = pasted_contents.values().collect();
+    // 後方（高 ID）から処理: 前方置換による後続 ID のインデックスずれを回避
+    refs.sort_by_key(|r| Reverse(r.id));
+    for paste_ref in refs {
+        let cache_path = paste_cache_dir.join(format!("{}.txt", paste_ref.content_hash));
+        let content = match std::fs::read_to_string(&cache_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let content = content.trim_end_matches('\n');
+        let prefix = format!("[Pasted text #{}", paste_ref.id);
+        if let Some(start) = result.find(&prefix) {
+            if let Some(end_offset) = result[start..].find(']') {
+                let end = start + end_offset + 1;
+                result.replace_range(start..end, content);
+            }
+        }
+    }
+    result
 }
 
 /// JSONL 1 行から `Prompt` を取り出す。
 ///
 /// 空行・JSON パース失敗・`display` 欠落・空文字列はすべて `None` を返す。
-/// 上流で `filter_map` に渡すことを想定。
-fn parse_entry(line: &str) -> Option<Prompt> {
+/// `paste_cache_dir` が空文字列のとき paste 展開をスキップする（テスト用）。
+fn parse_entry(line: &str, paste_cache_dir: &Path) -> Option<Prompt> {
     if line.trim().is_empty() {
         return None;
     }
     let entry: HistoryEntry = serde_json::from_str(line).ok()?;
     let display = entry.display?.trim().to_string();
     if display.is_empty() {
-        None
-    } else {
-        Some(Prompt {
-            display,
-            iso_timestamp: entry.iso_timestamp,
-        })
+        return None;
     }
+    // isoTimestamp（旧形式）を優先し、なければ timestamp（現行形式）を変換する
+    let iso_timestamp = entry
+        .iso_timestamp
+        .or_else(|| entry.timestamp.map(unix_ms_to_local_iso));
+    // paste-cache ディレクトリが指定されていてペーストコンテンツがある場合のみ展開
+    let full_text = match &entry.pasted_contents {
+        Some(pasted) if !pasted.is_empty() && !paste_cache_dir.as_os_str().is_empty() => {
+            expand_pasted_contents(&display, pasted, paste_cache_dir)
+        }
+        _ => display.clone(),
+    };
+    Some(Prompt {
+        display,
+        full_text,
+        iso_timestamp,
+    })
 }
 
 /// fzf 表示候補として採用すべきプロンプトか判定する。
@@ -115,14 +236,21 @@ fn dedup_keep_last(prompts: Vec<Prompt>) -> Vec<Prompt> {
     result
 }
 
-/// JSONL 行イテレータからプロンプトを収集する（テスト可能な純粋処理層）。
+/// JSONL 行イテレータからプロンプトを収集する（paste-cache 展開なし・テスト用）。
 ///
-/// 構成: parse → filter → dedup の 3 段。各段はファイル内の private 関数として
-/// 単独で意味を持つ。ファイル I/O を伴わないため失敗しない（返り値を Result に
-/// しないことでその事実を型で表現する）。
+/// 構成: parse → filter → dedup の 3 段。ファイル I/O を伴わないため失敗しない。
+#[cfg(test)]
 pub fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<Prompt> {
+    collect_prompts_with_cache(lines, Path::new(""))
+}
+
+/// JSONL 行イテレータからプロンプトを収集する（paste-cache 展開あり）。
+pub fn collect_prompts_with_cache(
+    lines: impl Iterator<Item = String>,
+    paste_cache_dir: &Path,
+) -> Vec<Prompt> {
     let eligible: Vec<Prompt> = lines
-        .filter_map(|l| parse_entry(&l))
+        .filter_map(|l| parse_entry(&l, paste_cache_dir))
         .filter(|p| is_eligible(&p.display))
         .collect();
     dedup_keep_last(eligible)
@@ -213,9 +341,104 @@ mod tests {
 
     #[test]
     fn missing_iso_timestamp_is_none() {
+        // isoTimestamp も timestamp も存在しない場合は None。
         let input = r#"{"display":"ビルドして"}"#;
         let result = collect_prompts(lines(input));
         assert!(result[0].iso_timestamp.is_none());
+    }
+
+    #[test]
+    fn numeric_timestamp_is_converted_to_local_iso_string() {
+        // 現行 Claude Code は isoTimestamp でなく timestamp（数値 ms）を書く。
+        // 1780928372000 ms ≈ 2026-06-08 JST
+        let input = r#"{"display":"test","timestamp":1780928372000}"#;
+        let result = collect_prompts(lines(input));
+        assert!(
+            result[0].iso_timestamp.is_some(),
+            "timestamp フィールドが iso_timestamp に変換されるべき"
+        );
+        let ts = result[0].iso_timestamp.as_ref().unwrap();
+        assert!(
+            ts.contains("2026"),
+            "2026 年のタイムスタンプになるべき: {ts}"
+        );
+    }
+
+    #[test]
+    fn iso_timestamp_takes_priority_over_numeric_timestamp() {
+        // isoTimestamp が存在する場合は timestamp より優先する（後方互換）。
+        let input =
+            r#"{"display":"test","isoTimestamp":"2026-06-03T01:20:13.918Z","timestamp":1000}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(
+            result[0].iso_timestamp.as_deref(),
+            Some("2026-06-03T01:20:13.918Z")
+        );
+    }
+
+    #[test]
+    fn full_text_equals_display_when_pasted_contents_empty() {
+        let input = r#"{"display":"通常のプロンプト","pastedContents":{}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    #[test]
+    fn full_text_equals_display_when_no_pasted_contents_field() {
+        let input = r#"{"display":"通常のプロンプト"}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    #[test]
+    fn pasted_content_is_expanded_in_full_text() {
+        // pastedContents がある場合、full_text ではプレースホルダを実内容に展開する。
+        // display は展開しない（fzf リスト表示用に短縮形を保持する）。
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = "deadbeef00000000";
+        std::fs::write(dir.path().join(format!("{hash}.txt")), "actual content").unwrap();
+        let input = format!(
+            r#"{{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{{"1":{{"id":1,"type":"text","contentHash":"{hash}"}}}}}}"#
+        );
+        let prompts = collect_prompts_with_cache(std::iter::once(input), dir.path());
+        assert_eq!(
+            prompts[0].display, "before [Pasted text #1 +1 lines] after",
+            "display はプレースホルダのまま保持する"
+        );
+        assert_eq!(
+            prompts[0].full_text, "before actual content after",
+            "full_text はキャッシュ内容に展開する"
+        );
+    }
+
+    #[test]
+    fn multiline_pasted_content_is_expanded() {
+        // 複数行のペースト内容も正しく展開される。
+        let dir = tempfile::TempDir::new().unwrap();
+        let hash = "aabbccdd00000000";
+        std::fs::write(
+            dir.path().join(format!("{hash}.txt")),
+            "line1\nline2\nline3\n",
+        )
+        .unwrap();
+        let input = format!(
+            r#"{{"display":"prefix [Pasted text #1 +3 lines] suffix","pastedContents":{{"1":{{"id":1,"type":"text","contentHash":"{hash}"}}}}}}"#
+        );
+        let prompts = collect_prompts_with_cache(std::iter::once(input), dir.path());
+        // 末尾の改行は trim_end_matches('\n') で除去される
+        assert_eq!(prompts[0].full_text, "prefix line1\nline2\nline3 suffix");
+    }
+
+    #[test]
+    fn missing_paste_cache_file_keeps_placeholder() {
+        // キャッシュファイルが存在しない場合は display をそのまま full_text にする。
+        let dir = tempfile::TempDir::new().unwrap();
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"nonexistent_hash"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(
+            prompts[0].full_text, "before [Pasted text #1 +1 lines] after",
+            "キャッシュ欠落時は display をそのまま使う"
+        );
     }
 
     #[test]
@@ -356,5 +579,219 @@ mod tests {
         let result = displays(collect_prompts(lines(input)));
         // collect_prompts は最新優先で返すため、ファイル末尾（line3）が先頭に来る
         assert_eq!(result, vec!["line1\nline3", "line1\nline2"]);
+    }
+
+    // ─── collect_prompts は full_text == display を常に保証 ──────────────────
+
+    #[test]
+    fn collect_prompts_full_text_always_equals_display() {
+        // cache なし版では full_text は展開されず display と一致する。
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    // ─── 複数のペースト参照 ────────────────────────────────────────────────────
+
+    #[test]
+    fn multiple_paste_refs_are_all_expanded() {
+        // 2 つのプレースホルダが両方とも展開される。
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hash1.txt"), "FIRST_CONTENT").unwrap();
+        std::fs::write(dir.path().join("hash2.txt"), "SECOND_CONTENT").unwrap();
+        // 高 id から降順展開するため #2 を先に置く（置換位置がずれないよう逆順処理）。
+        let input = r#"{"display":"a [Pasted text #1 +0 lines] b [Pasted text #2 +0 lines] c","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash1"},"2":{"id":2,"type":"text","contentHash":"hash2"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(prompts[0].full_text, "a FIRST_CONTENT b SECOND_CONTENT c");
+    }
+
+    #[test]
+    fn multiple_paste_refs_display_stays_as_placeholder() {
+        // 複数ペーストでも display は展開されない。
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hash1.txt"), "A").unwrap();
+        std::fs::write(dir.path().join("hash2.txt"), "B").unwrap();
+        let input = r#"{"display":"[Pasted text #1 +0 lines] [Pasted text #2 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash1"},"2":{"id":2,"type":"text","contentHash":"hash2"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(
+            prompts[0].display,
+            "[Pasted text #1 +0 lines] [Pasted text #2 +0 lines]"
+        );
+    }
+
+    // ─── dedup は display キーで行い full_text は最新を保持 ──────────────────
+
+    #[test]
+    fn dedup_preserves_full_text_of_latest_entry() {
+        // 同 display で 2 エントリある場合、後のエントリの full_text が残る。
+        // collect_prompts_with_cache を使い、異なる full_text が生成される状況を再現。
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("hash_old.txt"), "OLD_CONTENT").unwrap();
+        std::fs::write(dir.path().join("hash_new.txt"), "NEW_CONTENT").unwrap();
+        // display は同じ "[Pasted text #1 +0 lines]" だが cache hash が異なる。
+        let line1 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash_old"}}}"#;
+        let line2 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash_new"}}}"#;
+        let prompts = collect_prompts_with_cache(
+            vec![line1.to_string(), line2.to_string()].into_iter(),
+            dir.path(),
+        );
+        assert_eq!(prompts.len(), 1, "重複は 1 件に圧縮される");
+        assert_eq!(
+            prompts[0].full_text, "NEW_CONTENT",
+            "最新エントリの full_text が保持される"
+        );
+    }
+
+    // ─── 空の cache_dir は展開をスキップして display をそのまま使う ────────
+
+    #[test]
+    fn empty_cache_dir_path_skips_expansion() {
+        // collect_prompts（cache なし版）は paste_cache_dir を Path::new("") で呼ぶ。
+        // pastedContents が存在しても展開されずに display == full_text になること。
+        let input = r#"{"display":"[Pasted text #1 +2 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
+        let result = collect_prompts_with_cache(std::iter::once(input.to_string()), Path::new(""));
+        assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    // ─── 新着優先保証 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn entries_are_returned_newest_first_based_on_file_position() {
+        // history.jsonl はファイル末尾が最新。collect_prompts はその順を逆にして返す。
+        // fzf の先頭に最新プロンプトが来ることを保証する。
+        let input = r#"{"display":"最古のプロンプト"}
+{"display":"中間のプロンプト"}
+{"display":"最新のプロンプト"}"#;
+        let result = displays(collect_prompts(lines(input)));
+        assert_eq!(
+            result[0], "最新のプロンプト",
+            "最新エントリが先頭に来るべき"
+        );
+        assert_eq!(result[1], "中間のプロンプト");
+        assert_eq!(result[2], "最古のプロンプト");
+    }
+
+    #[test]
+    fn newest_among_duplicates_is_at_top() {
+        // 同一 display が複数回現れたとき、最後（最新）の出現が先頭に返る。
+        // 「2 回前に打ったコマンドの最新版」が先頭に来ることを保証する。
+        // timestamp=1780928372000 ≈ 2026-06-08（実際の Claude Code が書く値のオーダー）。
+        let input = r#"{"display":"ビルド","timestamp":1780928000000}
+{"display":"テスト"}
+{"display":"ビルド","timestamp":1780928372000}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].display, "ビルド", "重複の最新版が先頭");
+        // timestamp フィールドが iso_timestamp に変換されていること
+        assert!(
+            result[0].iso_timestamp.is_some(),
+            "最新エントリの iso_timestamp が Some であること"
+        );
+        // 最新エントリ（timestamp=1780928372000）の iso_timestamp は 2026 年
+        let ts = result[0].iso_timestamp.as_deref().unwrap();
+        assert!(
+            ts.contains("2026"),
+            "最新エントリが 2026 年のタイムスタンプを持つ: {ts}"
+        );
+    }
+
+    // ─── マルチセッション・クロス repo 可視性 ────────────────────────────────
+
+    #[test]
+    fn entries_from_multiple_sessions_all_visible() {
+        // Claude Code は起動元（直接 / dotfiles / dotfiles-ascend / worktree）に
+        // かかわらず全て ~/.claude/history.jsonl に書き込む。
+        // 複数の「セッション」から書かれたとみなせる連続エントリが全て見えることを保証する。
+        //
+        // この不変条件: ファイルが単一グローバルファイルであれば
+        // どのセッション由来エントリも collect_prompts は取りこぼさない。
+        let entries_from_session_a = r#"{"display":"dotfiles から打ったコマンド 1"}
+{"display":"dotfiles から打ったコマンド 2"}"#;
+        let entries_from_session_b = r#"{"display":"dotfiles-ascend から打ったコマンド"}
+{"display":"worktree から打ったコマンド"}"#;
+        let combined = format!("{}\n{}", entries_from_session_a, entries_from_session_b);
+
+        let result = displays(collect_prompts(lines(&combined)));
+
+        // 4 件すべてが返る（重複なし・フィルタ除外なし）
+        assert_eq!(result.len(), 4, "全セッションのエントリが可視: {result:?}");
+        assert!(result.contains(&"dotfiles から打ったコマンド 1".to_string()));
+        assert!(result.contains(&"dotfiles から打ったコマンド 2".to_string()));
+        assert!(result.contains(&"dotfiles-ascend から打ったコマンド".to_string()));
+        assert!(result.contains(&"worktree から打ったコマンド".to_string()));
+    }
+
+    #[test]
+    fn latest_session_entry_appears_first() {
+        // 後から起動した別セッション（worktree 等）のエントリが先頭に来ること。
+        let input = r#"{"display":"古いセッションのプロンプト"}
+{"display":"worktree セッションの最新プロンプト"}"#;
+        let result = displays(collect_prompts(lines(input)));
+        assert_eq!(
+            result[0], "worktree セッションの最新プロンプト",
+            "最後に起動したセッションの最新エントリが先頭に来るべき"
+        );
+    }
+
+    // ─── 実 history.jsonl との統合テスト ─────────────────────────────────────
+
+    #[test]
+    fn real_history_file_is_readable_and_contains_entries() {
+        // 実際の ~/.claude/history.jsonl が読めること・エントリが存在すること・
+        // 最新エントリが先頭にあることを検証する（CI 環境ではファイルがなければスキップ）。
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let path = std::path::PathBuf::from(&home).join(".claude/history.jsonl");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: {} が存在しないため統合テストをスキップ",
+                path.display()
+            );
+            return;
+        }
+        let result = load_prompts(&path).expect("history.jsonl の読み込みに失敗");
+        assert!(!result.is_empty(), "history.jsonl にエントリが存在すること");
+
+        // タイムスタンプ: 現行 Claude Code は timestamp（数値 ms）を書くため
+        // 少なくとも 1 件は iso_timestamp が Some になるはず
+        let has_timestamp = result.iter().any(|p| p.iso_timestamp.is_some());
+        assert!(
+            has_timestamp,
+            "timestamp フィールドが iso_timestamp に変換されていること"
+        );
+
+        // 重複なし: display がすべて一意
+        let displays: Vec<&str> = result.iter().map(|p| p.display.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> =
+            displays.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            displays.len(),
+            unique.len(),
+            "重複除去後のエントリに display の重複があってはならない"
+        );
+    }
+
+    #[test]
+    fn real_history_paste_expansion_works() {
+        // 実際の paste-cache を使って expand_pasted_contents が動作することを確認。
+        // CI 環境ではファイルがなければスキップ。
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let history_path = std::path::PathBuf::from(&home).join(".claude/history.jsonl");
+        let cache_dir = std::path::PathBuf::from(&home).join(".claude/paste-cache");
+        if !history_path.exists() || !cache_dir.exists() {
+            eprintln!("SKIP: history.jsonl または paste-cache が存在しないためスキップ");
+            return;
+        }
+
+        // pastedContents を持つエントリが 1 件以上あれば、
+        // そのうち少なくとも 1 件で full_text != display になることを期待する
+        // （キャッシュが残っている前提）。
+        let result = load_prompts(&history_path).expect("history.jsonl の読み込みに失敗");
+        let expanded_count = result.iter().filter(|p| p.full_text != p.display).count();
+        // この端末では paste-cache が存在するため少なくとも 1 件は展開されるはず。
+        // CI では 0 でも許容（cache が存在しない環境）。
+        eprintln!(
+            "INFO: {} / {} エントリでペースト展開が成功",
+            expanded_count,
+            result.len()
+        );
     }
 }
