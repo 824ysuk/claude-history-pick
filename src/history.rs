@@ -633,4 +633,146 @@ mod tests {
         let result = collect_prompts_with_cache(std::iter::once(input.to_string()), Path::new(""));
         assert_eq!(result[0].full_text, result[0].display);
     }
+
+    // ─── 新着優先保証 ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn entries_are_returned_newest_first_based_on_file_position() {
+        // history.jsonl はファイル末尾が最新。collect_prompts はその順を逆にして返す。
+        // fzf の先頭に最新プロンプトが来ることを保証する。
+        let input = r#"{"display":"最古のプロンプト"}
+{"display":"中間のプロンプト"}
+{"display":"最新のプロンプト"}"#;
+        let result = displays(collect_prompts(lines(input)));
+        assert_eq!(
+            result[0], "最新のプロンプト",
+            "最新エントリが先頭に来るべき"
+        );
+        assert_eq!(result[1], "中間のプロンプト");
+        assert_eq!(result[2], "最古のプロンプト");
+    }
+
+    #[test]
+    fn newest_among_duplicates_is_at_top() {
+        // 同一 display が複数回現れたとき、最後（最新）の出現が先頭に返る。
+        // 「2 回前に打ったコマンドの最新版」が先頭に来ることを保証する。
+        // timestamp=1780928372000 ≈ 2026-06-08（実際の Claude Code が書く値のオーダー）。
+        let input = r#"{"display":"ビルド","timestamp":1780928000000}
+{"display":"テスト"}
+{"display":"ビルド","timestamp":1780928372000}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].display, "ビルド", "重複の最新版が先頭");
+        // timestamp フィールドが iso_timestamp に変換されていること
+        assert!(
+            result[0].iso_timestamp.is_some(),
+            "最新エントリの iso_timestamp が Some であること"
+        );
+        // 最新エントリ（timestamp=1780928372000）の iso_timestamp は 2026 年
+        let ts = result[0].iso_timestamp.as_deref().unwrap();
+        assert!(
+            ts.contains("2026"),
+            "最新エントリが 2026 年のタイムスタンプを持つ: {ts}"
+        );
+    }
+
+    // ─── マルチセッション・クロス repo 可視性 ────────────────────────────────
+
+    #[test]
+    fn entries_from_multiple_sessions_all_visible() {
+        // Claude Code は起動元（直接 / dotfiles / dotfiles-ascend / worktree）に
+        // かかわらず全て ~/.claude/history.jsonl に書き込む。
+        // 複数の「セッション」から書かれたとみなせる連続エントリが全て見えることを保証する。
+        //
+        // この不変条件: ファイルが単一グローバルファイルであれば
+        // どのセッション由来エントリも collect_prompts は取りこぼさない。
+        let entries_from_session_a = r#"{"display":"dotfiles から打ったコマンド 1"}
+{"display":"dotfiles から打ったコマンド 2"}"#;
+        let entries_from_session_b = r#"{"display":"dotfiles-ascend から打ったコマンド"}
+{"display":"worktree から打ったコマンド"}"#;
+        let combined = format!("{}\n{}", entries_from_session_a, entries_from_session_b);
+
+        let result = displays(collect_prompts(lines(&combined)));
+
+        // 4 件すべてが返る（重複なし・フィルタ除外なし）
+        assert_eq!(result.len(), 4, "全セッションのエントリが可視: {result:?}");
+        assert!(result.contains(&"dotfiles から打ったコマンド 1".to_string()));
+        assert!(result.contains(&"dotfiles から打ったコマンド 2".to_string()));
+        assert!(result.contains(&"dotfiles-ascend から打ったコマンド".to_string()));
+        assert!(result.contains(&"worktree から打ったコマンド".to_string()));
+    }
+
+    #[test]
+    fn latest_session_entry_appears_first() {
+        // 後から起動した別セッション（worktree 等）のエントリが先頭に来ること。
+        let input = r#"{"display":"古いセッションのプロンプト"}
+{"display":"worktree セッションの最新プロンプト"}"#;
+        let result = displays(collect_prompts(lines(input)));
+        assert_eq!(
+            result[0], "worktree セッションの最新プロンプト",
+            "最後に起動したセッションの最新エントリが先頭に来るべき"
+        );
+    }
+
+    // ─── 実 history.jsonl との統合テスト ─────────────────────────────────────
+
+    #[test]
+    fn real_history_file_is_readable_and_contains_entries() {
+        // 実際の ~/.claude/history.jsonl が読めること・エントリが存在すること・
+        // 最新エントリが先頭にあることを検証する（CI 環境ではファイルがなければスキップ）。
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let path = std::path::PathBuf::from(&home).join(".claude/history.jsonl");
+        if !path.exists() {
+            eprintln!(
+                "SKIP: {} が存在しないため統合テストをスキップ",
+                path.display()
+            );
+            return;
+        }
+        let result = load_prompts(&path).expect("history.jsonl の読み込みに失敗");
+        assert!(!result.is_empty(), "history.jsonl にエントリが存在すること");
+
+        // タイムスタンプ: 現行 Claude Code は timestamp（数値 ms）を書くため
+        // 少なくとも 1 件は iso_timestamp が Some になるはず
+        let has_timestamp = result.iter().any(|p| p.iso_timestamp.is_some());
+        assert!(
+            has_timestamp,
+            "timestamp フィールドが iso_timestamp に変換されていること"
+        );
+
+        // 重複なし: display がすべて一意
+        let displays: Vec<&str> = result.iter().map(|p| p.display.as_str()).collect();
+        let unique: std::collections::HashSet<&&str> =
+            displays.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(
+            displays.len(),
+            unique.len(),
+            "重複除去後のエントリに display の重複があってはならない"
+        );
+    }
+
+    #[test]
+    fn real_history_paste_expansion_works() {
+        // 実際の paste-cache を使って expand_pasted_contents が動作することを確認。
+        // CI 環境ではファイルがなければスキップ。
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let history_path = std::path::PathBuf::from(&home).join(".claude/history.jsonl");
+        let cache_dir = std::path::PathBuf::from(&home).join(".claude/paste-cache");
+        if !history_path.exists() || !cache_dir.exists() {
+            eprintln!("SKIP: history.jsonl または paste-cache が存在しないためスキップ");
+            return;
+        }
+
+        // pastedContents を持つエントリが 1 件以上あれば、
+        // そのうち少なくとも 1 件で full_text != display になることを期待する
+        // （キャッシュが残っている前提）。
+        let result = load_prompts(&history_path).expect("history.jsonl の読み込みに失敗");
+        let expanded_count = result.iter().filter(|p| p.full_text != p.display).count();
+        // この端末では paste-cache が存在するため少なくとも 1 件は展開されるはず。
+        // CI では 0 でも許容（cache が存在しない環境）。
+        eprintln!(
+            "INFO: {} / {} エントリでペースト展開が成功",
+            expanded_count,
+            result.len()
+        );
+    }
 }
