@@ -61,6 +61,17 @@ mkdir -p ~/.local/bin
 ln -sf "$PWD/target/release/claude-history-pick" ~/.local/bin/claude-history-pick
 ```
 
+## アップデート
+
+PR マージ後や `git pull` 後は **`cargo build --release` を実行してバイナリを再ビルドする必要がある**。
+シムリンクは `target/release/` を直接指しているため再作成不要。
+
+```bash
+cd ~/Projects/claude-history-pick
+git pull origin main
+cargo build --release
+```
+
 ## 環境変数
 
 | 変数 | デフォルト | 説明 |
