@@ -26,7 +26,7 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     let mut tmp = NamedTempFile::new().ok()?;
     for prompt in prompts {
         let ts = prompt.iso_timestamp.as_deref().unwrap_or("");
-        let _ = writeln!(tmp, "{}\t{}", escape_newlines(&prompt.display), ts);
+        let _ = writeln!(tmp, "{}\t{}", escape_newlines(&prompt.full_text), ts);
     }
     let _ = tmp.flush();
     let tmp_path = tmp.path().to_path_buf();
@@ -76,7 +76,7 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
         }
         // fzf は --with-nth でも行全体を返すため "{index}\t{display}" をパース
         let idx: usize = trimmed.split('\t').next()?.parse().ok()?;
-        prompts.get(idx).map(|p| p.display.clone())
+        prompts.get(idx).map(|p| p.full_text.clone())
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None
@@ -131,6 +131,15 @@ mod tests {
     fn make_prompt(display: &str, ts: Option<&str>) -> Prompt {
         Prompt {
             display: display.to_string(),
+            full_text: display.to_string(),
+            iso_timestamp: ts.map(|s| s.to_string()),
+        }
+    }
+
+    fn make_prompt_with_full_text(display: &str, full_text: &str, ts: Option<&str>) -> Prompt {
+        Prompt {
+            display: display.to_string(),
+            full_text: full_text.to_string(),
             iso_timestamp: ts.map(|s| s.to_string()),
         }
     }
@@ -298,6 +307,56 @@ mod tests {
     fn make_prompt_helper_works() {
         let p = make_prompt("test", Some("2026-06-07T00:00:00Z"));
         assert_eq!(p.display, "test");
+        assert_eq!(p.full_text, "test");
         assert_eq!(p.iso_timestamp.as_deref(), Some("2026-06-07T00:00:00Z"));
+    }
+
+    #[test]
+    fn make_prompt_with_full_text_stores_distinct_values() {
+        let p = make_prompt_with_full_text(
+            "[Pasted text #1 +3 lines]",
+            "line1\nline2\nline3",
+            None,
+        );
+        assert_eq!(p.display, "[Pasted text #1 +3 lines]");
+        assert_eq!(p.full_text, "line1\nline2\nline3");
+    }
+
+    // --- preview temp file はescape_newlines(full_text) を書き出すことを検証 ---
+    // pick() は fzf を起動するため直接テスト不可だが、
+    // escape_newlines が full_text に適用されることを間接的に保証するため
+    // 「full_text に改行が含まれていても正しくエスケープされる」ことを確認する。
+
+    #[test]
+    fn full_text_with_newlines_is_escaped_to_unit_separator() {
+        // full_text の改行 (LF) が \x1f に置換されることで一時ファイル内で 1 行に収まる。
+        let full = "line1\nline2\nline3";
+        let escaped = escape_newlines(full);
+        assert!(!escaped.contains('\n'), "LF が残っている: {escaped:?}");
+        assert_eq!(escaped.matches('\x1f').count(), 2);
+    }
+
+    #[test]
+    fn full_text_without_newlines_is_unchanged_after_escape() {
+        let full = "[Pasted text #1 +3 lines]";
+        assert_eq!(escape_newlines(full), full);
+    }
+
+    #[test]
+    fn display_line_of_placeholder_is_single_line() {
+        // display に改行がない場合は display_line もそのまま。
+        let p = make_prompt("[Pasted text #1 +3 lines]", None);
+        assert_eq!(display_line(&p.display), "[Pasted text #1 +3 lines]");
+    }
+
+    #[test]
+    fn display_line_of_full_text_returns_first_line() {
+        // full_text が複数行でも display_line は先頭行のみ返す。
+        let p = make_prompt_with_full_text(
+            "[Pasted text #1 +3 lines]",
+            "line1\nline2\nline3",
+            None,
+        );
+        assert_eq!(display_line(&p.full_text), "line1");
     }
 }
