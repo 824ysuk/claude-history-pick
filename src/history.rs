@@ -145,6 +145,14 @@ fn expand_pasted_contents(
     // 後方（高 ID）から処理: 前方置換による後続 ID のインデックスずれを回避
     refs.sort_by_key(|r| Reverse(r.id));
     for paste_ref in refs {
+        // content_hash は hex 文字列のはず。非 hex 値はパストラバーサルの経路になり得るためスキップ。
+        if !paste_ref
+            .content_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+        {
+            continue;
+        }
         let cache_path = paste_cache_dir.join(format!("{}.txt", paste_ref.content_hash));
         let content = match std::fs::read_to_string(&cache_path) {
             Ok(c) => c,
@@ -597,10 +605,10 @@ mod tests {
     fn multiple_paste_refs_are_all_expanded() {
         // 2 つのプレースホルダが両方とも展開される。
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hash1.txt"), "FIRST_CONTENT").unwrap();
-        std::fs::write(dir.path().join("hash2.txt"), "SECOND_CONTENT").unwrap();
+        std::fs::write(dir.path().join("deadbeef00000001.txt"), "FIRST_CONTENT").unwrap();
+        std::fs::write(dir.path().join("deadbeef00000002.txt"), "SECOND_CONTENT").unwrap();
         // 高 id から降順展開するため #2 を先に置く（置換位置がずれないよう逆順処理）。
-        let input = r#"{"display":"a [Pasted text #1 +0 lines] b [Pasted text #2 +0 lines] c","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash1"},"2":{"id":2,"type":"text","contentHash":"hash2"}}}"#;
+        let input = r#"{"display":"a [Pasted text #1 +0 lines] b [Pasted text #2 +0 lines] c","pastedContents":{"1":{"id":1,"type":"text","contentHash":"deadbeef00000001"},"2":{"id":2,"type":"text","contentHash":"deadbeef00000002"}}}"#;
         let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
         assert_eq!(prompts[0].full_text, "a FIRST_CONTENT b SECOND_CONTENT c");
     }
@@ -609,9 +617,9 @@ mod tests {
     fn multiple_paste_refs_display_stays_as_placeholder() {
         // 複数ペーストでも display は展開されない。
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hash1.txt"), "A").unwrap();
-        std::fs::write(dir.path().join("hash2.txt"), "B").unwrap();
-        let input = r#"{"display":"[Pasted text #1 +0 lines] [Pasted text #2 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash1"},"2":{"id":2,"type":"text","contentHash":"hash2"}}}"#;
+        std::fs::write(dir.path().join("deadbeef00000001.txt"), "A").unwrap();
+        std::fs::write(dir.path().join("deadbeef00000002.txt"), "B").unwrap();
+        let input = r#"{"display":"[Pasted text #1 +0 lines] [Pasted text #2 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"deadbeef00000001"},"2":{"id":2,"type":"text","contentHash":"deadbeef00000002"}}}"#;
         let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
         assert_eq!(
             prompts[0].display,
@@ -626,11 +634,11 @@ mod tests {
         // 同 display で 2 エントリある場合、後のエントリの full_text が残る。
         // collect_prompts_with_cache を使い、異なる full_text が生成される状況を再現。
         let dir = tempfile::TempDir::new().unwrap();
-        std::fs::write(dir.path().join("hash_old.txt"), "OLD_CONTENT").unwrap();
-        std::fs::write(dir.path().join("hash_new.txt"), "NEW_CONTENT").unwrap();
+        std::fs::write(dir.path().join("aabbccdd00000001.txt"), "OLD_CONTENT").unwrap();
+        std::fs::write(dir.path().join("aabbccdd00000002.txt"), "NEW_CONTENT").unwrap();
         // display は同じ "[Pasted text #1 +0 lines]" だが cache hash が異なる。
-        let line1 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash_old"}}}"#;
-        let line2 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"hash_new"}}}"#;
+        let line1 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"aabbccdd00000001"}}}"#;
+        let line2 = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"aabbccdd00000002"}}}"#;
         let prompts = collect_prompts_with_cache(
             vec![line1.to_string(), line2.to_string()].into_iter(),
             dir.path(),

@@ -46,7 +46,7 @@ use std::time::Duration;
 /// UID を含めることでマルチユーザー環境での衝突を防ぐ。
 /// Accessibility 拒否時の `osascript is not allowed to send keystrokes` エラーを記録する。
 fn osascript_log_path() -> PathBuf {
-    let uid = unsafe { libc::getuid() };
+    let uid = nix::unistd::getuid();
     PathBuf::from(format!("/tmp/{uid}.claude-history-pick.osascript.log"))
 }
 
