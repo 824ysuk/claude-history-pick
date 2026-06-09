@@ -3,6 +3,7 @@
 //! 責務: JSON パース・フィルタリング・重複除去・ペーストキャッシュ展開のみ。
 //! UI（fzf）・クリップボード・キーストロークは扱わない。
 
+use chrono::{Local, TimeZone};
 use serde::Deserialize;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -112,21 +113,15 @@ fn load_prompts_from_reader_with_cache<R: BufRead>(
 
 /// Unix ミリ秒タイムスタンプをローカル時刻の ISO 8601 形式文字列に変換する。
 ///
-/// `libc::localtime_r` でローカル時刻に変換する。UTC ではないため末尾に 'Z' を付けない。
+/// UTC ではないため末尾に 'Z' を付けない。
 /// 「いつ打ったか」を人間が読む用途なのでローカル時刻が適切。
 fn unix_ms_to_local_iso(ms: u64) -> String {
-    let secs = (ms / 1000) as libc::time_t;
-    let mut t: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&secs, &mut t) };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-        t.tm_year + 1900,
-        t.tm_mon + 1,
-        t.tm_mday,
-        t.tm_hour,
-        t.tm_min,
-        t.tm_sec
-    )
+    let secs = i64::try_from(ms / 1000).unwrap_or(i64::MAX);
+    Local
+        .timestamp_opt(secs, 0)
+        .single()
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string())
+        .unwrap_or_else(|| "1970-01-01T00:00:00".to_string())
 }
 
 /// `display` 内の `[Pasted text #id ...]` プレースホルダを
