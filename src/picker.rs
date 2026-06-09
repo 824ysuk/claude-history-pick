@@ -93,11 +93,12 @@ fn display_line(prompt: &str) -> String {
 
 /// プレビュー用一時ファイルへの書き出し形式に変換する。
 ///
-/// 改行を \x1f (Unit Separator, octal \037) に置換することで、
-/// 1 プロンプト = 1 行として書き出せる。
-/// 復元は awk 内の gsub で行う。
+/// 改行を \x1f (Unit Separator, octal \037)、タブを \x1e (Record Separator, octal \036)
+/// に置換することで、1 プロンプト = 1 行として書き出せる。
+/// 復元は awk 内の gsub で行う。タブを別途エスケープするのは、一時ファイルの
+/// フィールド区切りがタブであるため full_text 内の literal タブが awk の $1/$2 分割を崩すため。
 fn escape_newlines(prompt: &str) -> String {
-    prompt.replace('\n', "\x1f")
+    prompt.replace('\n', "\x1f").replace('\t', "\x1e")
 }
 
 /// fzf に渡す preview コマンド文字列を構築する（純粋関数）。
@@ -105,11 +106,11 @@ fn escape_newlines(prompt: &str) -> String {
 /// 一時ファイルの各行形式: `{display_escaped}\t{iso_timestamp_or_empty}`
 /// - `{1}` は fzf の 0-based インデックスプレースホルダ、awk の `NR` は 1-based のため +1 で補正
 /// - タイムスタンプが存在する場合は `[YYYY-MM-DDTHH:MM:SS.sssZ]` をプレビュー先頭に表示
-/// - `\037` (Unit Separator) を `\n` に戻してプロンプト全文を表示
+/// - `\037` (Unit Separator) を `\n` に、`\036` (Record Separator) を `\t` に戻してプロンプト全文を表示
 /// - `tmp_path` は POSIX シェルエスケープで囲みインジェクションを防ぐ
 fn build_preview_cmd(tmp_path: &str) -> String {
     format!(
-        "awk -F'\\t' 'NR=={{1}}+1 {{ if ($2 != \"\") printf \"[%s]\\n\\n\", $2; gsub(/\\037/, \"\\n\", $1); print $1 }}' {}",
+        "awk -F'\\t' 'NR=={{1}}+1 {{ if ($2 != \"\") printf \"[%s]\\n\\n\", $2; gsub(/\\037/, \"\\n\", $1); gsub(/\\036/, \"\\t\", $1); print $1 }}' {}",
         posix_shell_quote(tmp_path)
     )
 }
@@ -188,9 +189,10 @@ mod tests {
     }
 
     #[test]
-    fn escape_newlines_preserves_tabs() {
-        // タブはそのまま保持（display_line が別途スペース変換する）
-        assert_eq!(escape_newlines("a\tb"), "a\tb");
+    fn escape_newlines_escapes_tabs() {
+        // タブはフィールド区切り衝突防止のため \x1e (Record Separator) に置換する。
+        // awk で gsub(/\036/, "\t") により復元される。
+        assert_eq!(escape_newlines("a\tb"), "a\x1eb");
     }
 
     #[test]
@@ -253,6 +255,15 @@ mod tests {
         assert!(
             cmd.contains("gsub(/\\037/, \"\\n\", $1)"),
             "gsub による改行復元が欠落: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_restores_tabs_via_gsub() {
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("gsub(/\\036/, \"\\t\", $1)"),
+            "gsub によるタブ復元が欠落: {cmd}"
         );
     }
 
