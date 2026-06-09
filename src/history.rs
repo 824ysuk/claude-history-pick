@@ -146,7 +146,11 @@ fn expand_pasted_contents(
     refs.sort_by_key(|r| Reverse(r.id));
     for paste_ref in refs {
         // content_hash は hex 文字列のはず。非 hex 値はパストラバーサルの経路になり得るためスキップ。
-        if !paste_ref.content_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !paste_ref
+            .content_hash
+            .chars()
+            .all(|c| c.is_ascii_hexdigit())
+        {
             continue;
         }
         let cache_path = paste_cache_dir.join(format!("{}.txt", paste_ref.content_hash));
