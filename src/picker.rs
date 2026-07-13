@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 
 use tempfile::NamedTempFile;
 
+/// ANSI エスケープをリセットするシーケンス。`Source::ansi_color()` で色付けした
+/// prefix の直後に必ず付与する。
+const ANSI_RESET: &str = "\x1b[0m";
+
 /// `prompts` を fzf に渡してインタラクティブ選択させ、選択されたオリジナル全文を返す。
 ///
 /// fzf には各プロンプトの先頭行のみを表示候補として渡し、選択後にインデックスで
@@ -26,7 +30,13 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     let mut tmp = NamedTempFile::new().ok()?;
     for prompt in prompts {
         let ts = prompt.timestamp().unwrap_or("");
-        let _ = writeln!(tmp, "{}\t{}", escape_newlines(prompt.full_text()), ts);
+        let _ = writeln!(
+            tmp,
+            "{}\t{}\t{}",
+            escape_newlines(prompt.full_text()),
+            ts,
+            prompt.source().label()
+        );
     }
     let _ = tmp.flush();
     let tmp_path = tmp.path().to_path_buf();
@@ -34,25 +44,7 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     let preview_cmd = build_preview_cmd(&tmp_path.to_string_lossy());
 
     let mut child = Command::new("fzf")
-        .args([
-            "--height",
-            "100%",      // ターミナル全体を使う
-            "--reverse", // 候補を上から下に表示（プロンプトが上）
-            "--no-sort", // 入力順（最新→最古）を保持。デフォルトのスコアソートは文字列が
-            // 短いほど高スコアになり、長いプロンプトが古い短いバリアントより
-            // 下に押し出される。ヒストリピッカーではマッチ品質より使用時刻の
-            // 新しさを優先するため無効化する。
-            "--prompt",
-            "Claude History > ",
-            "--delimiter",
-            "\t", // フィールド区切りをタブに設定
-            "--with-nth",
-            "2..", // インデックス列（1列目）を表示から除外
-            "--preview",
-            &preview_cmd, // 一時ファイルからプロンプト全文と時刻を復元して表示
-            "--preview-window",
-            "down:10:wrap", // 複数行プロンプトが見やすいよう 10 行に拡大
-        ])
+        .args(build_fzf_args(&preview_cmd))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -62,10 +54,10 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
         })
         .ok()?;
 
-    // stdin に "{index}\t{display_line}" を 1 行ずつ書き込む
+    // stdin に "{index}\t{source_prefix}{display_line}" を 1 行ずつ書き込む
     if let Some(mut stdin) = child.stdin.take() {
         for (i, prompt) in prompts.iter().enumerate() {
-            let _ = writeln!(stdin, "{}\t{}", i, display_line(prompt.display()));
+            let _ = writeln!(stdin, "{}\t{}", i, display_line_with_source(prompt));
         }
         // stdin を drop することで fzf 側の EOF が発生し、候補リストが確定する
     }
@@ -87,12 +79,53 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     }
 }
 
+/// fzf 起動引数を組み立てる（純粋関数）。`--preview` のみ呼び出し時点の一時ファイル
+/// パスに依存する動的値で、他は固定値。テストで `--ansi` 等の必須オプション漏れを
+/// 機械的に検出できるよう、`Command::args` へのインライン列挙から切り出している。
+fn build_fzf_args(preview_cmd: &str) -> Vec<&str> {
+    vec![
+        "--height",
+        "100%",      // ターミナル全体を使う
+        "--reverse", // 候補を上から下に表示（プロンプトが上）
+        "--no-sort", // 入力順（最新→最古）を保持。デフォルトのスコアソートは文字列が
+        // 短いほど高スコアになり、長いプロンプトが古い短いバリアントより
+        // 下に押し出される。ヒストリピッカーではマッチ品質より使用時刻の
+        // 新しさを優先するため無効化する。
+        "--ansi", // source prefix の色（[Claude]/[Codex]）を解釈しつつ、検索対象は
+        // プレーンテキストのまま扱う（fzf は ANSI エスケープを表示専用として除去する）。
+        "--prompt",
+        "History > ",
+        "--delimiter",
+        "\t", // フィールド区切りをタブに設定
+        "--with-nth",
+        "2..", // インデックス列（1列目）を表示から除外
+        "--preview",
+        preview_cmd, // 一時ファイルからプロンプト全文と時刻を復元して表示
+        "--preview-window",
+        "down:10:wrap", // 複数行プロンプトが見やすいよう 10 行に拡大
+    ]
+}
+
 /// fzf 表示用に 1 行へ正規化する。
 ///
 /// 複数行プロンプトは先頭行のみを返す。タブ文字はフィールド区切りと
 /// 衝突するためスペースに置換する。
 fn display_line(prompt: &str) -> String {
     prompt.lines().next().unwrap_or("").replace('\t', " ")
+}
+
+/// `display_line` の結果に色付き `[Source]` prefix を付与する。
+///
+/// 色・ラベルは `Source::ansi_color` / `Source::label`（history.rs）から取る。
+/// ソースを追加するたびに picker 側の分岐を増やさずに済むよう、色分けの
+/// 責務は `Source` 側に閉じ込めている。
+fn display_line_with_source(prompt: &Prompt) -> String {
+    format!(
+        "{color}[{label}]{ANSI_RESET} {line}",
+        color = prompt.source().ansi_color(),
+        label = prompt.source().label(),
+        line = display_line(prompt.display())
+    )
 }
 
 /// プレビュー用一時ファイルへの書き出し形式に変換する。
@@ -107,14 +140,15 @@ fn escape_newlines(prompt: &str) -> String {
 
 /// fzf に渡す preview コマンド文字列を構築する（純粋関数）。
 ///
-/// 一時ファイルの各行形式: `{display_escaped}\t{iso_timestamp_or_empty}`
+/// 一時ファイルの各行形式: `{full_text_escaped}\t{iso_timestamp_or_empty}\t{source_label}`
 /// - `{1}` は fzf の 0-based インデックスプレースホルダ、awk の `NR` は 1-based のため +1 で補正
-/// - タイムスタンプが存在する場合は `[YYYY-MM-DDTHH:MM:SS.sssZ]` をプレビュー先頭に表示
+/// - ヘッダとして `[Claude]` / `[Codex]`（`$3`）を常に表示し、タイムスタンプ（`$2`）が
+///   存在する場合は続けて `[YYYY-MM-DDTHH:MM:SS]` を表示する
 /// - `\037` (Unit Separator) を `\n` に、`\036` (Record Separator) を `\t` に戻してプロンプト全文を表示
 /// - `tmp_path` は POSIX シェルエスケープで囲みインジェクションを防ぐ
 fn build_preview_cmd(tmp_path: &str) -> String {
     format!(
-        "awk -F'\\t' 'NR=={{1}}+1 {{ if ($2 != \"\") printf \"[%s]\\n\\n\", $2; gsub(/\\037/, \"\\n\", $1); gsub(/\\036/, \"\\t\", $1); print $1 }}' {}",
+        "awk -F'\\t' 'NR=={{1}}+1 {{ header = \"[\" $3 \"]\"; if ($2 != \"\") header = header \" [\" $2 \"]\"; printf \"%s\\n\\n\", header; gsub(/\\037/, \"\\n\", $1); gsub(/\\036/, \"\\t\", $1); print $1 }}' {}",
         posix_shell_quote(tmp_path)
     )
 }
@@ -132,22 +166,8 @@ fn posix_shell_quote(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn make_prompt(display: &str, ts: Option<&str>) -> Prompt {
-        Prompt {
-            display: display.to_string(),
-            full_text: display.to_string(),
-            iso_timestamp: ts.map(|s| s.to_string()),
-        }
-    }
-
-    fn make_prompt_with_full_text(display: &str, full_text: &str, ts: Option<&str>) -> Prompt {
-        Prompt {
-            display: display.to_string(),
-            full_text: full_text.to_string(),
-            iso_timestamp: ts.map(|s| s.to_string()),
-        }
-    }
+    use crate::history::test_support::{make_prompt, make_prompt_with_full_text};
+    use crate::history::Source;
 
     #[test]
     fn display_line_single_line() {
@@ -244,16 +264,6 @@ mod tests {
     }
 
     #[test]
-    fn build_preview_cmd_shows_timestamp_when_present() {
-        // タイムスタンプ列（$2）が空でなければ printf で表示する節が含まれること。
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
-        assert!(
-            cmd.contains("if ($2 != \"\") printf"),
-            "タイムスタンプ表示節が欠落: {cmd}"
-        );
-    }
-
-    #[test]
     fn build_preview_cmd_restores_newlines_via_gsub() {
         let cmd = build_preview_cmd("/tmp/chp-abc.txt");
         assert!(
@@ -318,22 +328,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn make_prompt_helper_works() {
-        let p = make_prompt("test", Some("2026-06-07T00:00:00Z"));
-        assert_eq!(p.display, "test");
-        assert_eq!(p.full_text, "test");
-        assert_eq!(p.iso_timestamp.as_deref(), Some("2026-06-07T00:00:00Z"));
-    }
-
-    #[test]
-    fn make_prompt_with_full_text_stores_distinct_values() {
-        let p =
-            make_prompt_with_full_text("[Pasted text #1 +3 lines]", "line1\nline2\nline3", None);
-        assert_eq!(p.display, "[Pasted text #1 +3 lines]");
-        assert_eq!(p.full_text, "line1\nline2\nline3");
-    }
-
     // --- preview temp file はescape_newlines(full_text) を書き出すことを検証 ---
     // pick() は fzf を起動するため直接テスト不可だが、
     // escape_newlines が full_text に適用されることを間接的に保証するため
@@ -357,15 +351,107 @@ mod tests {
     #[test]
     fn display_line_of_placeholder_is_single_line() {
         // display に改行がない場合は display_line もそのまま。
-        let p = make_prompt("[Pasted text #1 +3 lines]", None);
+        let p = make_prompt(Source::Claude, "[Pasted text #1 +3 lines]", None);
         assert_eq!(display_line(&p.display), "[Pasted text #1 +3 lines]");
     }
 
     #[test]
     fn display_line_of_full_text_returns_first_line() {
         // full_text が複数行でも display_line は先頭行のみ返す。
-        let p =
-            make_prompt_with_full_text("[Pasted text #1 +3 lines]", "line1\nline2\nline3", None);
+        let p = make_prompt_with_full_text(
+            Source::Claude,
+            "[Pasted text #1 +3 lines]",
+            "line1\nline2\nline3",
+            None,
+        );
         assert_eq!(display_line(&p.full_text), "line1");
+    }
+
+    // ─── source prefix ──────────────────────────────────────────────────────
+
+    #[test]
+    fn display_line_with_source_prefixes_claude() {
+        let p = make_prompt(Source::Claude, "ビルドして", None);
+        let line = display_line_with_source(&p);
+        assert!(
+            line.starts_with("\x1b[36m[Claude]\x1b[0m "),
+            "実際: {line:?}"
+        );
+        assert!(line.ends_with("ビルドして"));
+    }
+
+    #[test]
+    fn display_line_with_source_prefixes_codex() {
+        let p = make_prompt(Source::Codex, "テストして", None);
+        let line = display_line_with_source(&p);
+        assert!(
+            line.starts_with("\x1b[35m[Codex]\x1b[0m "),
+            "実際: {line:?}"
+        );
+        assert!(line.ends_with("テストして"));
+    }
+
+    #[test]
+    fn display_line_with_source_uses_first_line_only() {
+        // display_line の「先頭行のみ」規約を display_line_with_source も継承する。
+        let p = make_prompt_with_full_text(Source::Codex, "1st\n2nd", "1st\n2nd", None);
+        let line = display_line_with_source(&p);
+        assert!(!line.contains('\n'), "改行が残っている: {line:?}");
+        assert!(line.ends_with("1st"));
+    }
+
+    // ─── preview ヘッダ（source + timestamp） ──────────────────────────────
+
+    #[test]
+    fn build_preview_cmd_header_always_includes_source_column() {
+        // $3（source label）は常にヘッダへ含む。
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("header = \"[\" $3 \"]\""),
+            "source label をヘッダに含める節が欠落: {cmd}"
+        );
+    }
+
+    #[test]
+    fn build_preview_cmd_header_appends_timestamp_when_present() {
+        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        assert!(
+            cmd.contains("if ($2 != \"\") header = header \" [\" $2 \"]\""),
+            "タイムスタンプ追記節が欠落: {cmd}"
+        );
+    }
+
+    // ─── fzf 起動引数 ───────────────────────────────────────────────────────
+
+    #[test]
+    fn build_fzf_args_includes_ansi() {
+        // --ansi がないと source prefix の色エスケープが生の文字列として表示されてしまう。
+        let args = build_fzf_args("dummy-preview-cmd");
+        assert!(args.contains(&"--ansi"), "実際: {args:?}");
+    }
+
+    #[test]
+    fn build_fzf_args_includes_no_sort() {
+        let args = build_fzf_args("dummy-preview-cmd");
+        assert!(args.contains(&"--no-sort"), "実際: {args:?}");
+    }
+
+    #[test]
+    fn build_fzf_args_uses_tab_delimiter_matching_stdin_format() {
+        // stdin は "{index}\t{...}" 形式で書き込む（pick 関数）ため、fzf 側の
+        // --delimiter もタブでなければならない。ここがずれるとインデックス列の
+        // 逆引きが壊れる（fzf は最初のフィールドを表示から除外できなくなる）。
+        let args = build_fzf_args("dummy-preview-cmd");
+        let delim_idx = args
+            .iter()
+            .position(|a| *a == "--delimiter")
+            .expect("--delimiter が見つからない");
+        assert_eq!(args[delim_idx + 1], "\t");
+    }
+
+    #[test]
+    fn build_fzf_args_embeds_preview_cmd_verbatim() {
+        let args = build_fzf_args("my-unique-preview-command");
+        assert!(args.contains(&"my-unique-preview-command"));
     }
 }
