@@ -99,6 +99,21 @@ fn expand_pasted_contents(
     result
 }
 
+/// レガシー `isoTimestamp`（RFC3339 文字列、例 `"2026-06-03T01:20:13.918Z"`）を
+/// Unix ミリ秒に変換する。
+///
+/// `timestamp`（数値 ms）フィールドを持たない古いエントリでも、この変換に
+/// よって `history::merge_sort_dedup` の時刻降順マージ・重複除去に正しく
+/// 参加できる。変換なしで `timestamp_ms = None` のままだと、実際の記録時刻に
+/// 関わらず常に最下位に沈み、かつ同一 `(source, display)` の重複除去でも
+/// 「最初に現れたもの」が最新とは限らなくなる（stable sort が元の並びを保持
+/// するため）。パース失敗時は `None`（実データでは発生しない fallback）。
+fn parse_iso_timestamp_to_ms(iso: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
 /// JSONL 1 行から `Prompt` を取り出す。
 ///
 /// 空行・JSON パース失敗・`display` 欠落・空文字列はすべて `None` を返す。
@@ -112,9 +127,15 @@ fn parse_entry(line: &str, paste_cache_dir: &Path) -> Option<Prompt> {
     if display.is_empty() {
         return None;
     }
-    // isoTimestamp（旧形式）を優先し、なければ timestamp（現行形式）を変換する。
-    // timestamp_ms はソート専用: isoTimestamp 由来は数値へ逆変換できないため None。
-    let timestamp_ms = entry.timestamp.map(|ms| ms as i64);
+    // timestamp（現行形式、数値 ms）を優先。isoTimestamp（旧形式）しかない場合も
+    // parse_iso_timestamp_to_ms で数値化し、他ソースとのマージ順序を正しく保つ。
+    let timestamp_ms = entry.timestamp.map(|ms| ms as i64).or_else(|| {
+        entry
+            .iso_timestamp
+            .as_deref()
+            .and_then(parse_iso_timestamp_to_ms)
+    });
+    // 表示用文字列は isoTimestamp（旧形式）を優先し、なければ timestamp を変換する。
     let iso_timestamp = entry
         .iso_timestamp
         .or_else(|| timestamp_ms.map(unix_ms_to_local_iso));
@@ -200,10 +221,20 @@ mod tests {
     }
 
     #[test]
-    fn iso_timestamp_only_entry_has_no_timestamp_ms() {
-        // isoTimestamp レガシーフィールドのみの場合、ソート用の timestamp_ms は
-        // 逆変換できないため None（merge_sort_dedup で最下位扱いになる）。
+    fn iso_timestamp_only_entry_derives_timestamp_ms_from_rfc3339() {
+        // isoTimestamp レガシーフィールドのみでも RFC3339 パースで timestamp_ms を
+        // 逆算する（merge_sort_dedup での最下位固定・dedup 誤挙動を防ぐ）。
         let input = r#"{"display":"ビルドして","isoTimestamp":"2026-06-03T01:20:13.918Z"}"#;
+        let result = collect_prompts(lines(input));
+        // 2026-06-03T01:20:13.918Z の Unix ミリ秒。
+        assert_eq!(result[0].timestamp_ms, Some(1_780_449_613_918));
+    }
+
+    #[test]
+    fn malformed_iso_timestamp_falls_back_to_none() {
+        // パース不能な isoTimestamp（実データでは発生しない想定）は
+        // timestamp_ms = None にフォールバックし、クラッシュしない。
+        let input = r#"{"display":"ビルドして","isoTimestamp":"not-a-valid-timestamp"}"#;
         let result = collect_prompts(lines(input));
         assert_eq!(result[0].timestamp_ms, None);
     }

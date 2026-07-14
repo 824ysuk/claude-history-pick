@@ -12,10 +12,16 @@ use serde::Deserialize;
 use std::path::Path;
 
 /// history.jsonl の 1 行に対応する構造体。
+///
+/// `session_id` は本パーサでは使わないため定義しない（serde はデフォルトで
+/// 未知フィールドを無視するため、含めなくてもパースは壊れない）。
+/// `text` は公式スキーマ上必須フィールド（`String`、`Option` ではない）。
+/// 欠落・型不一致は deserialize 自体が失敗し `parse_entry` の `.ok()?` で
+/// スキップされるため、`Option` にする防御的な迂回は不要。
 #[derive(Deserialize)]
 struct CodexHistoryEntry {
     ts: u64,
-    text: Option<String>,
+    text: String,
 }
 
 /// `history_path` の JSONL を読み込み、`Prompt` 一覧を返す（フィルタ・重複除去前）。
@@ -35,7 +41,7 @@ fn parse_entry(line: &str) -> Option<Prompt> {
         return None;
     }
     let entry: CodexHistoryEntry = serde_json::from_str(line).ok()?;
-    let display = entry.text?.trim().to_string();
+    let display = entry.text.trim().to_string();
     if display.is_empty() {
         return None;
     }
