@@ -24,7 +24,13 @@ const ANSI_RESET: &str = "\x1b[0m";
 /// 複数行プロンプトは先頭行のみを fzf に表示し、選択後にオリジナル全文を返す。
 /// インデックスをタブ区切りで付与して fzf 出力から逆引きするため、
 /// 先頭行が重複するプロンプトが存在しても正しいエントリを返せる。
-pub fn pick(prompts: &[Prompt]) -> Option<String> {
+///
+/// `had_unexpected_error` が true の場合、fzf の prompt 文字列に警告を含める。
+/// 片方のソースだけ IO エラー（Permission denied 等）で読み込みに失敗し、
+/// もう片方が正常だと exit code は通常通り 0 になり picker も普通に開くため、
+/// 起動直後に流れる stderr の 1 行を見逃すと利用者が履歴欠落に気づく手段が
+/// ない。fzf 画面に留まる prompt 文字列に警告を出すことで気づけるようにする。
+pub fn pick(prompts: &[Prompt], had_unexpected_error: bool) -> Option<String> {
     // プレビュー用一時ファイル: tempfile はランダム名 + O_CREAT|O_EXCL で生成するため
     // 予測可能パスによる symlink attack を防げる。NamedTempFile は Drop で自動削除。
     let mut tmp = NamedTempFile::new().ok()?;
@@ -42,9 +48,10 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     let tmp_path = tmp.path().to_path_buf();
 
     let preview_cmd = build_preview_cmd(&tmp_path.to_string_lossy());
+    let prompt_label = fzf_prompt_label(had_unexpected_error);
 
     let mut child = Command::new("fzf")
-        .args(build_fzf_args(&preview_cmd))
+        .args(build_fzf_args(&preview_cmd, &prompt_label))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -79,10 +86,24 @@ pub fn pick(prompts: &[Prompt]) -> Option<String> {
     }
 }
 
-/// fzf 起動引数を組み立てる（純粋関数）。`--preview` のみ呼び出し時点の一時ファイル
-/// パスに依存する動的値で、他は固定値。テストで `--ansi` 等の必須オプション漏れを
-/// 機械的に検出できるよう、`Command::args` へのインライン列挙から切り出している。
-fn build_fzf_args(preview_cmd: &str) -> Vec<&str> {
+/// fzf の `--prompt` に使うラベルを組み立てる（純粋関数）。
+///
+/// `had_unexpected_error` が true なら、片方のソースが IO エラーで読み込めな
+/// かったことを常に視界に入る prompt 文字列で警告する（stderr の 1 行だけだと
+/// fzf 起動後に流れて見逃されるため）。
+fn fzf_prompt_label(had_unexpected_error: bool) -> String {
+    if had_unexpected_error {
+        "History [⚠ 一部の履歴を読み込めませんでした] > ".to_string()
+    } else {
+        "History > ".to_string()
+    }
+}
+
+/// fzf 起動引数を組み立てる（純粋関数）。`--preview`/`--prompt` のみ呼び出し
+/// 時点の値（一時ファイルパス・エラー有無）に依存する動的値で、他は固定値。
+/// テストで `--ansi` 等の必須オプション漏れを機械的に検出できるよう、
+/// `Command::args` へのインライン列挙から切り出している。
+fn build_fzf_args<'a>(preview_cmd: &'a str, prompt_label: &'a str) -> Vec<&'a str> {
     vec![
         "--height",
         "100%",      // ターミナル全体を使う
@@ -94,7 +115,7 @@ fn build_fzf_args(preview_cmd: &str) -> Vec<&str> {
         "--ansi", // source prefix の色（[Claude]/[Codex]）を解釈しつつ、検索対象は
         // プレーンテキストのまま扱う（fzf は ANSI エスケープを表示専用として除去する）。
         "--prompt",
-        "History > ",
+        prompt_label,
         "--delimiter",
         "\t", // フィールド区切りをタブに設定
         "--with-nth",
@@ -426,13 +447,13 @@ mod tests {
     #[test]
     fn build_fzf_args_includes_ansi() {
         // --ansi がないと source prefix の色エスケープが生の文字列として表示されてしまう。
-        let args = build_fzf_args("dummy-preview-cmd");
+        let args = build_fzf_args("dummy-preview-cmd", "History > ");
         assert!(args.contains(&"--ansi"), "実際: {args:?}");
     }
 
     #[test]
     fn build_fzf_args_includes_no_sort() {
-        let args = build_fzf_args("dummy-preview-cmd");
+        let args = build_fzf_args("dummy-preview-cmd", "History > ");
         assert!(args.contains(&"--no-sort"), "実際: {args:?}");
     }
 
@@ -441,7 +462,7 @@ mod tests {
         // stdin は "{index}\t{...}" 形式で書き込む（pick 関数）ため、fzf 側の
         // --delimiter もタブでなければならない。ここがずれるとインデックス列の
         // 逆引きが壊れる（fzf は最初のフィールドを表示から除外できなくなる）。
-        let args = build_fzf_args("dummy-preview-cmd");
+        let args = build_fzf_args("dummy-preview-cmd", "History > ");
         let delim_idx = args
             .iter()
             .position(|a| *a == "--delimiter")
@@ -451,7 +472,30 @@ mod tests {
 
     #[test]
     fn build_fzf_args_embeds_preview_cmd_verbatim() {
-        let args = build_fzf_args("my-unique-preview-command");
+        let args = build_fzf_args("my-unique-preview-command", "History > ");
         assert!(args.contains(&"my-unique-preview-command"));
+    }
+
+    #[test]
+    fn build_fzf_args_embeds_prompt_label_verbatim() {
+        let args = build_fzf_args("dummy-preview-cmd", "History [test] > ");
+        assert!(args.contains(&"History [test] > "));
+    }
+
+    // ─── fzf prompt ラベル ──────────────────────────────────────────────────
+
+    #[test]
+    fn fzf_prompt_label_is_plain_without_error() {
+        assert_eq!(fzf_prompt_label(false), "History > ");
+    }
+
+    #[test]
+    fn fzf_prompt_label_warns_on_unexpected_error() {
+        let label = fzf_prompt_label(true);
+        assert_ne!(label, "History > ");
+        assert!(
+            label.contains("読み込めませんでした"),
+            "エラー発生を示す文言が prompt に含まれるべき: {label}"
+        );
     }
 }
