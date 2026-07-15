@@ -1,6 +1,15 @@
-# claude-history-pick
+# agent-history-pick
 
-`~/.claude/history.jsonl` を fzf で検索し、選択したプロンプトを Zed 上の Claude Code 入力欄に自動貼り付けする Rust バイナリ。
+Claude Code / Codex CLI のプロンプト履歴を fzf で統合検索し、選択したプロンプトを Zed 上の入力欄に自動貼り付けする Rust バイナリ。
+
+## 対応履歴ソース
+
+| ソース | デフォルトパス | override 環境変数 |
+|---|---|---|
+| Claude Code | `~/.claude/history.jsonl` | `CLAUDE_HISTORY_PATH` |
+| Codex CLI | `$CODEX_HOME/history.jsonl`（`CODEX_HOME` 未設定時は `~/.codex/history.jsonl`） | `CODEX_HISTORY_PATH` / `CODEX_HOME` |
+
+両ソースの履歴はタイムスタンプで統合・重複除去（新しい順）され、fzf 上に `[Claude]` / `[Codex]` の色分けラベル付きで表示される。
 
 ## 動作フロー
 
@@ -18,7 +27,8 @@ ctrl-; r
 
 | 仕様 | 動作 |
 |---|---|
-| 表示順 | **新しい順**（最後に入力したプロンプトが先頭） |
+| 表示順 | **新しい順**（最後に入力したプロンプトが先頭、両ソースを統合してソート） |
+| 表示ラベル | `[Claude]`（シアン）/ `[Codex]`（マゼンタ）で出所を色分け表示 |
 | 重複 | **自動除去**（同じテキストは1件のみ表示。最新の出現位置を優先） |
 | スラッシュコマンド | 単独形（`/help` `/code-review` 等、`/` + 英数/ハイフン/アンダースコアのみ）は除外。引数や記号を伴うもの（`/loop 5m /foo` `/code-review --comment` `/foo:bar` 等）は採用 |
 | 空エントリ | 除外 |
@@ -30,7 +40,9 @@ fuzzy 検索で絞り込みながら選択できる。複数行プロンプト�
 ```
 src/
 ├── main.rs       — エントリポイント・全体フロー
-├── history.rs    — ~/.claude/history.jsonl のパース（serde_json）
+├── claude.rs     — ~/.claude/history.jsonl のパース（serde_json）
+├── codex.rs      — Codex CLI の history.jsonl のパース
+├── history.rs    — Prompt 共通表現・merge_sort_dedup によるソース統合
 ├── picker.rs     — fzf 起動・選択結果取得
 ├── clipboard.rs  — pbcopy でクリップボードにコピー
 ├── guard.rs      — PID ロックファイルによる単一インスタンス保証
@@ -52,24 +64,26 @@ fzf は `--with-nth` / `--delimiter` を使うため 0.20 以降が必要（`bre
 
 ```bash
 # クローン & ビルド
-git clone https://github.com/824ysuk/claude-history-pick
-cd claude-history-pick
+git clone https://github.com/824ysuk/agent-history-pick
+cd agent-history-pick
 cargo build --release
 
 # ~/.local/bin に配置
 mkdir -p ~/.local/bin
-ln -sf "$PWD/target/release/claude-history-pick" ~/.local/bin/claude-history-pick
+ln -sf "$PWD/target/release/agent-history-pick" ~/.local/bin/agent-history-pick
 ```
 
 ## 環境変数
 
 | 変数 | デフォルト | 説明 |
 |---|---|---|
-| `CLAUDE_HISTORY_PATH` | `~/.claude/history.jsonl` | 履歴ファイルのパス |
+| `CLAUDE_HISTORY_PATH` | `~/.claude/history.jsonl` | Claude Code 履歴ファイルのパス |
+| `CODEX_HISTORY_PATH` | (未設定) | Codex CLI 履歴ファイルのパス（`CODEX_HOME` より優先） |
+| `CODEX_HOME` | `~/.codex` | Codex CLI 自身のホームディレクトリ。`$CODEX_HOME/history.jsonl` を履歴として読む |
 
 ```bash
 # 例: 別パスを使う
-CLAUDE_HISTORY_PATH=/path/to/history.jsonl claude-history-pick
+CLAUDE_HISTORY_PATH=/path/to/history.jsonl agent-history-pick
 ```
 
 ## Zed 設定
@@ -81,8 +95,8 @@ CLAUDE_HISTORY_PATH=/path/to/history.jsonl claude-history-pick
 ```json
 [
   {
-    "label": "Claude History Search",
-    "command": "~/.local/bin/claude-history-pick",
+    "label": "Agent History Search",
+    "command": "~/.local/bin/agent-history-pick",
     "use_new_terminal": true,
     "reveal": "always",
     "hide": "on_success"
@@ -98,7 +112,7 @@ CLAUDE_HISTORY_PATH=/path/to/history.jsonl claude-history-pick
 {
   "context": "Terminal",
   "bindings": {
-    "ctrl-; r": ["task::Spawn", { "task_name": "Claude History Search" }],
+    "ctrl-; r": ["task::Spawn", { "task_name": "Agent History Search" }],
     "cmd-r": "terminal::Paste"
   }
 }
