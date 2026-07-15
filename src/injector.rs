@@ -33,7 +33,7 @@
 //! `osascript is not allowed to send keystrokes` エラーで失敗する。
 //! AppleScript の `try ... on error ... end try` でこれをキャッチし、
 //! macOS 通知でアクセシビリティ設定を案内する。
-//! osascript の stderr は /tmp/<uid>.claude-history-pick.osascript.log に記録する。
+//! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
 use std::fs::OpenOptions;
 use std::os::unix::process::CommandExt;
@@ -47,7 +47,7 @@ use std::time::Duration;
 /// Accessibility 拒否時の `osascript is not allowed to send keystrokes` エラーを記録する。
 fn osascript_log_path() -> PathBuf {
     let uid = nix::unistd::getuid();
-    PathBuf::from(format!("/tmp/{uid}.claude-history-pick.osascript.log"))
+    PathBuf::from(format!("/tmp/{uid}.agent-history-pick.osascript.log"))
 }
 
 /// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
@@ -82,10 +82,10 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
         "keystroke \"r\" using command down".to_string(),
         "end tell".to_string(),
         "on error errMsg number errNum".to_string(),
-        "display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"claude-history-pick ⚠ Accessibility 権限\"".to_string(),
+        "display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"agent-history-pick ⚠ Accessibility 権限\"".to_string(),
         "end try".to_string(),
         "else".to_string(),
-        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"claude-history-pick ⚠\"".to_string(),
+        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"agent-history-pick ⚠\"".to_string(),
         "end if".to_string(),
     ]
 }
@@ -177,7 +177,7 @@ mod tests {
         let args = build_script_args(Duration::from_millis(500));
         let has_notification = args
             .iter()
-            .any(|s| s.contains("display notification") && s.contains("claude-history-pick ⚠"));
+            .any(|s| s.contains("display notification") && s.contains("agent-history-pick ⚠"));
         assert!(
             has_notification,
             "フォールバック通知行が見つからない: {args:?}"
@@ -287,7 +287,7 @@ mod tests {
         // spawn() 失敗が呼び出し側に伝搬することを担保。`?` を消してしまうと
         // この test が落ちる。
         let result = spawn_injector_with_program(
-            "/nonexistent/binary/claude-history-pick-test",
+            "/nonexistent/binary/agent-history-pick-test",
             Duration::from_millis(0),
         );
         assert!(result.is_err(), "存在しない binary でも Ok を返した");

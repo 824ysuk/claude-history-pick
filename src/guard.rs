@@ -5,20 +5,20 @@
 //!
 //! ## なぜ PID ロックファイルか
 //!
-//! `pkill -x fzf` は claude-history-pick 以外の fzf を巻き込む。
+//! `pkill -x fzf` は agent-history-pick 以外の fzf を巻き込む。
 //! ロックファイルに先行インスタンスの PID を記録することで、
 //! その子（fzf）だけを `pkill -P <pid>` で正確に終了させられる。
 //!
 //! ## ロックファイルの配置
 //!
-//! /tmp/<uid>.claude-history-pick.lock を使う。
+//! /tmp/<uid>.agent-history-pick.lock を使う。
 //! UID を含めることでマルチユーザー環境での衝突を防ぎ、
 //! /tmp の性質上 OS 再起動で自動消滅するため古いロックが残らない。
 //!
 //! ## PID 再利用対策
 //!
 //! ロックファイルの PID が生きていても、プロセス名が
-//! claude-history-pick でなければ kill しない。
+//! agent-history-pick でなければ kill しない。
 //!
 //! ## アトミックなロック取得
 //!
@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn lock_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/{}.claude-history-pick.lock", getuid()))
+    PathBuf::from(format!("/tmp/{}.agent-history-pick.lock", getuid()))
 }
 
 /// 単一インスタンス権を取得する。
@@ -106,8 +106,8 @@ fn write_pid(path: &Path) {
 /// PID が自バイナリと同一の実行ファイルかを確認する（PID 再利用対策）。
 ///
 /// macOS では process name (comm) が 15 文字に切り詰められるため
-/// `pgrep -x claude-history-pick`（19 文字）は常に空を返す。
-/// `ps -o comm=` は argv[0] を返す。PATH 経由起動ではベア名（例: `claude-history-pick`）、
+/// `pgrep -x agent-history-pick`（18 文字）は常に空を返す。
+/// `ps -o comm=` は argv[0] を返す。PATH 経由起動ではベア名（例: `agent-history-pick`）、
 /// フルパス起動ではフルパスになるため、basename で比較する。
 ///
 /// basename 一致で判定することで、バイナリを別名でコピーしても誤 kill しない。
@@ -156,7 +156,7 @@ pub fn is_our_process_pub(pid: libc::pid_t) -> bool {
 
 /// 先行インスタンスとその子プロセス（fzf）を終了させ、通知を出す。
 fn evict(old_pid: libc::pid_t) {
-    // fzf は claude-history-pick の子なので先に終了させる
+    // fzf は agent-history-pick の子なので先に終了させる
     std::process::Command::new("pkill")
         .args(["-P", &old_pid.to_string()])
         .status()
@@ -181,7 +181,7 @@ fn evict(old_pid: libc::pid_t) {
             &format!(
                 "display notification \
                  \"残留プロセス (PID {old_pid}) を終了しました。続けて操作できます。\" \
-                 with title \"claude-history-pick\""
+                 with title \"agent-history-pick\""
             ),
         ])
         .status()

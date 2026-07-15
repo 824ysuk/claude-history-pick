@@ -1,11 +1,11 @@
 [package]
-name = "claude-history-pick"
+name = "agent-history-pick"
 version = "0.1.0"
 edition = "2021"
 description = "Claude Code / Codex CLI のプロンプト履歴を fzf で選択して Zed に貼り付けるツール"
 
 [[bin]]
-name = "claude-history-pick"
+name = "agent-history-pick"
 path = "src/main.rs"
 
 [dependencies]

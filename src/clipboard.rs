@@ -50,8 +50,8 @@ mod tests {
     #[test]
     fn copy_to_clipboard_writes_text() {
         let _guard = CLIPBOARD_MUTEX.lock().unwrap();
-        copy_to_clipboard("claude-history-pick test").expect("pbcopy failed");
-        assert_eq!(pbpaste(), "claude-history-pick test");
+        copy_to_clipboard("agent-history-pick test").expect("pbcopy failed");
+        assert_eq!(pbpaste(), "agent-history-pick test");
     }
 
     #[test]

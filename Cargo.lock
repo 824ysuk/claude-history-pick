@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "agent-history-pick"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "libc",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -66,18 +78,6 @@ dependencies = [
  "iana-time-zone",
  "num-traits",
  "windows-link",
-]
-
-[[package]]
-name = "claude-history-pick"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "libc",
- "nix",
- "serde",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
