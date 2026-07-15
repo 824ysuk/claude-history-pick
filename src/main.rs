@@ -1,4 +1,4 @@
-//! claude-history-pick: Claude Code / Codex CLI のプロンプト履歴を fzf で選択して Zed に貼り付ける。
+//! agent-history-pick: Claude Code / Codex CLI のプロンプト履歴を fzf で選択して Zed に貼り付ける。
 //!
 //! ## 処理フロー
 //!
@@ -59,7 +59,7 @@ enum PathOrigin {
     /// デフォルトパス（環境変数なし）。欠落は「そのツールを使っていない」ことを示す。
     Default,
     /// 本ツール専用の明示 override 環境変数（`EnvPathSource::Direct`）。
-    /// ユーザーが claude-history-pick に対して能動的に指定した値なので、
+    /// ユーザーが agent-history-pick に対して能動的に指定した値なので、
     /// 欠落は設定ミスの可能性が高いことを明示するメッセージを出す。
     ExplicitEnvVar(&'static str),
     /// 他ツール自身の環境変数を間借り（`EnvPathSource::DirJoinFile`）。
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(
             origin,
             PathOrigin::BorrowedEnvVar("CODEX_HOME"),
-            "CODEX_HOME は Codex 自身の設定を間借りしているだけで claude-history-pick \
+            "CODEX_HOME は Codex 自身の設定を間借りしているだけで agent-history-pick \
              への明示指定ではないため BorrowedEnvVar にすべき"
         );
     }
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn codex_home_missing_history_file_is_treated_as_non_fatal() {
         // history.persistence = "none" 等で Codex 側が history.jsonl を意図的に
-        // 作らない設定も正当にありうる。CODEX_HOME 経由の欠落で claude-history-pick
+        // 作らない設定も正当にありうる。CODEX_HOME 経由の欠落で agent-history-pick
         // 自体が fatal error になってはならない（Claude 側のみで動作継続すべき）。
         let _guard = ENV_MUTEX.lock().unwrap();
         clear_all_history_env_vars();
