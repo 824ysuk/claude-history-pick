@@ -35,22 +35,22 @@ jobs:
 
       - name: package
         run: |
-          ASSET="claude-history-pick-${{ matrix.target }}.tar.gz"
-          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" claude-history-pick
+          ASSET="agent-history-pick-${{ matrix.target }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" agent-history-pick
           shasum -a 256 "$ASSET" > "${ASSET}.sha256"
 
       - name: upload-release-asset
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            claude-history-pick-${{ matrix.target }}.tar.gz
-            claude-history-pick-${{ matrix.target }}.tar.gz.sha256
+            agent-history-pick-${{ matrix.target }}.tar.gz
+            agent-history-pick-${{ matrix.target }}.tar.gz.sha256
 
       - name: upload-binary-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/claude-history-pick
+          path: target/${{ matrix.target }}/release/agent-history-pick
 
   universal:
     needs: build
@@ -70,15 +70,15 @@ jobs:
 
       - name: create-universal-binary
         run: |
-          lipo -create aarch64/claude-history-pick x86_64/claude-history-pick \
-            -output claude-history-pick
-          ASSET="claude-history-pick-universal-apple-darwin.tar.gz"
-          tar -czf "$ASSET" claude-history-pick
+          lipo -create aarch64/agent-history-pick x86_64/agent-history-pick \
+            -output agent-history-pick
+          ASSET="agent-history-pick-universal-apple-darwin.tar.gz"
+          tar -czf "$ASSET" agent-history-pick
           shasum -a 256 "$ASSET" > "${ASSET}.sha256"
 
       - name: upload-universal-release-asset
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            claude-history-pick-universal-apple-darwin.tar.gz
-            claude-history-pick-universal-apple-darwin.tar.gz.sha256
+            agent-history-pick-universal-apple-darwin.tar.gz
+            agent-history-pick-universal-apple-darwin.tar.gz.sha256
