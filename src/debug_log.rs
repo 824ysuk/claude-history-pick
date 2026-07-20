@@ -138,4 +138,28 @@ mod tests {
         let line = format_selection_line(0, &prompt);
         assert!(line.ends_with("()"));
     }
+
+    /// `log_startup` / `log_selection` が実際にディスク上のログファイルへ
+    /// 追記することを確認する（フォーマット純粋関数のテストでは open/write の
+    /// 実際の I/O 経路は検証できないため）。injector.rs の
+    /// `spawn_injector_with_existing_program_returns_ok` と同様、実 /tmp パスへの
+    /// 副作用を許容するテスト。
+    #[test]
+    fn log_startup_and_log_selection_write_to_real_debug_log_file() {
+        let marker = "debug-log-real-io-check-9f3c2a";
+        let prompts = vec![make_prompt(Source::Claude, marker, Some(0))];
+
+        log_startup(&prompts);
+        log_selection(0, &prompts[0]);
+
+        let contents = std::fs::read_to_string(debug_log_path()).expect("デバッグログの読み込みに失敗");
+        assert!(
+            contents.contains(&format!("STARTUP #1 [Claude] {marker}")),
+            "STARTUP 行が実ファイルに書き込まれていない: {contents}"
+        );
+        assert!(
+            contents.contains(&format!("SELECTED idx=0 [Claude] {marker}")),
+            "SELECTED 行が実ファイルに書き込まれていない: {contents}"
+        );
+    }
 }
