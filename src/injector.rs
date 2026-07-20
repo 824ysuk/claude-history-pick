@@ -35,9 +35,9 @@
 //! macOS 通知でアクセシビリティ設定を案内する。
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
-use std::fs::OpenOptions;
+use crate::secure_log;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -48,6 +48,17 @@ use std::time::Duration;
 fn osascript_log_path() -> PathBuf {
     let uid = nix::unistd::getuid();
     PathBuf::from(format!("/tmp/{uid}.agent-history-pick.osascript.log"))
+}
+
+/// `path` を stderr リダイレクト先として open する。symlink 攻撃対策・権限強制は
+/// `secure_log::open_hardened` に委ねる（debug_log.rs と共通の方針）。
+///
+/// open 失敗時（symlink 経由の拒否を含む）は /dev/null にフォールバックし、
+/// 本機能を止めない。
+fn open_stderr_log(path: &Path) -> Stdio {
+    secure_log::open_hardened(path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null())
 }
 
 /// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
@@ -114,13 +125,7 @@ fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::i
     }
 
     // stderr をログファイルに記録する。Accessibility 拒否エラーの診断に使う。
-    // open 失敗時は /dev/null にフォールバックし、本機能を止めない。
-    let stderr = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(osascript_log_path())
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::null());
+    let stderr = open_stderr_log(&osascript_log_path());
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -303,4 +308,9 @@ mod tests {
             "フォーカス取得後 settle (delay 0.3) 行が見つからない: {args:?}"
         );
     }
+
+    // symlink 拒否・ファイル権限の自己修復は secure_log.rs のテストでカバー済み
+    // （open_stderr_log は secure_log::open_hardened のごく薄いラッパーであり、
+    // spawn_injector_with_existing_program_returns_ok が実際に open_stderr_log
+    // を経由するため、配線自体もそこで確認できている）。
 }
