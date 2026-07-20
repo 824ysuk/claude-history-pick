@@ -244,7 +244,10 @@ mod tests {
 
     #[test]
     fn posix_shell_quote_plain_path() {
-        assert_eq!(posix_shell_quote("/tmp/chp-abc.txt"), "'/tmp/chp-abc.txt'");
+        assert_eq!(
+            posix_shell_quote("/tmp/preview-abc.txt"),
+            "'/tmp/preview-abc.txt'"
+        );
     }
 
     #[test]
@@ -270,7 +273,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_includes_index_plus_one() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("NR=={1}+1"),
             "0-based → 1-based 補正が欠落: {cmd}"
@@ -279,16 +282,16 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_quotes_tmp_path() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
-            cmd.contains("'/tmp/chp-abc.txt'"),
+            cmd.contains("'/tmp/preview-abc.txt'"),
             "tmp_path がシェルクォートされていない: {cmd}"
         );
     }
 
     #[test]
     fn build_preview_cmd_restores_newlines_via_gsub() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("gsub(/\\037/, \"\\n\", $1)"),
             "gsub による改行復元が欠落: {cmd}"
@@ -297,7 +300,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_restores_tabs_via_gsub() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("gsub(/\\036/, \"\\t\", $1)"),
             "gsub によるタブ復元が欠落: {cmd}"
@@ -315,7 +318,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_uses_tab_as_field_separator() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("-F'\\t'"),
             "awk フィールド区切り -F'\\t' が欠落: {cmd}"
@@ -428,7 +431,7 @@ mod tests {
     #[test]
     fn build_preview_cmd_header_always_includes_source_column() {
         // $3（source label）は常にヘッダへ含む。
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("header = \"[\" $3 \"]\""),
             "source label をヘッダに含める節が欠落: {cmd}"
@@ -437,7 +440,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_header_appends_timestamp_when_present() {
-        let cmd = build_preview_cmd("/tmp/chp-abc.txt");
+        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
         assert!(
             cmd.contains("if ($2 != \"\") header = header \" [\" $2 \"]\""),
             "タイムスタンプ追記節が欠落: {cmd}"
