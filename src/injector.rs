@@ -36,8 +36,9 @@
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
 use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -48,6 +49,30 @@ use std::time::Duration;
 fn osascript_log_path() -> PathBuf {
     let uid = nix::unistd::getuid();
     PathBuf::from(format!("/tmp/{uid}.agent-history-pick.osascript.log"))
+}
+
+/// `path` を追記モードで open する（`open_stderr_log` の本体。symlink 拒否の
+/// 成否をファイルオープンの成功/失敗として直接テストできるよう分離している）。
+///
+/// UID から決定的に導出される予測可能パスのため、マルチユーザー環境では他ユーザーが
+/// 事前に symlink を仕込む競合（CWE-59 / TOCTOU）が理論上成立する。`O_NOFOLLOW` で
+/// symlink 経由の open を OS レベルで拒否する。
+fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new()
+        .append(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+/// `path` を stderr リダイレクト先として open する。
+///
+/// open 失敗時（symlink 経由の拒否を含む）は /dev/null にフォールバックし、
+/// 本機能を止めない。
+fn open_stderr_log(path: &Path) -> Stdio {
+    open_log_file(path)
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null())
 }
 
 /// osascript に渡す `-e` 引数のリストを構築する（純粋関数）。
@@ -114,13 +139,7 @@ fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::i
     }
 
     // stderr をログファイルに記録する。Accessibility 拒否エラーの診断に使う。
-    // open 失敗時は /dev/null にフォールバックし、本機能を止めない。
-    let stderr = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(osascript_log_path())
-        .map(Stdio::from)
-        .unwrap_or_else(|_| Stdio::null());
+    let stderr = open_stderr_log(&osascript_log_path());
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -301,6 +320,40 @@ mod tests {
         assert!(
             args.iter().any(|s| s == "delay 0.3"),
             "フォーカス取得後 settle (delay 0.3) 行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn open_log_file_creates_regular_file() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("osascript.log");
+
+        let result = open_log_file(&path);
+        assert!(result.is_ok(), "通常パスの open に失敗した: {result:?}");
+        assert!(path.exists(), "ログファイルが作成されていない");
+    }
+
+    /// symlink 経由の open が `O_NOFOLLOW` により拒否されることを確認する
+    /// （CWE-59 対策の実効性テスト）。
+    #[test]
+    fn open_log_file_refuses_to_follow_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let victim = dir.path().join("victim.txt");
+        let log_path = dir.path().join("osascript.log");
+        std::fs::write(&victim, "original victim content").expect("victim 作成に失敗");
+        symlink(&victim, &log_path).expect("symlink 作成に失敗");
+
+        let result = open_log_file(&log_path);
+        assert!(
+            result.is_err(),
+            "symlink 経由の open が O_NOFOLLOW で拒否されなかった"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim 読み込みに失敗"),
+            "original victim content",
+            "symlink 経由で victim ファイルが書き換えられてしまった"
         );
     }
 }
