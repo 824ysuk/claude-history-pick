@@ -24,6 +24,7 @@ mod guard;
 mod history;
 mod injector;
 mod picker;
+mod secure_log;
 
 use history::Prompt;
 use std::io;

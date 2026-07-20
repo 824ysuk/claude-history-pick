@@ -3,6 +3,8 @@
 //! 責務: ログファイルへの追記のみ。フォーマット組み立て（純粋関数）と
 //! ファイル I/O を分離しているのは、フォーマット部分を実ファイルなしで
 //! テストするため（injector.rs の build_script_args パターンを踏襲）。
+//! symlink 攻撃対策・ファイル権限の強制は secure_log.rs に集約している
+//! （injector.rs と同じ方針を独立実装すると drift するため）。
 //!
 //! ## サイズ上限とローテーション
 //!
@@ -12,23 +14,6 @@
 //! ログの実際の書き込み量（起動 1 回あたり最大 11 行）に合わせて縮小適用する:
 //! 上限を超えたら `.1` へ 1 世代だけ退避し、新規ファイルから書き直す。
 //!
-//! ## symlink 攻撃対策
-//!
-//! ログパスは UID から決定的に導出されるため、マルチユーザー環境では他ユーザーが
-//! 事前にこのパスへ symlink を仕込む競合（CWE-59 / TOCTOU）が理論上成立する。
-//! `open(2)` に `O_NOFOLLOW` を指定し、symlink 経由のオープンを OS レベルで拒否する
-//! （Rust std: `OpenOptionsExt::custom_flags`）。ローテーション判定も
-//! `symlink_metadata`（lstat 相当）で行い、symlink を追跡しない。
-//!
-//! ## ファイル権限
-//!
-//! ログにはプロンプト本文（機密情報を含み得る）がそのまま記録されるため、
-//! 他ユーザーに読まれないよう所有者のみ読み書き可能（0600）に制限する。
-//! `OpenOptionsExt::mode` は生成時の umask で削られる方向にしか効かず、かつ
-//! 既存ファイル（本対策より前に作成され緩い権限のまま残っているものを含む）には
-//! 適用されないため、open 成功後に `set_permissions` で明示的に強制する
-//! （自己修復。ローテーション先の `.1` にも同様に適用する）。
-//!
 //! ## 並行実行についての前提
 //!
 //! `log_startup` / `log_selection` は main.rs の `guard::acquire()` 〜
@@ -36,10 +21,10 @@
 //! 複数プロセスからの同時書き込みは想定していない。
 
 use crate::history::Prompt;
+use crate::secure_log;
 use chrono::Local;
-use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// STARTUP ログに残す上位件数。
@@ -51,10 +36,6 @@ const STARTUP_LOG_LIMIT: usize = 10;
 /// ≈ 1.65KB のため、1MB は数百回分の実行履歴に相当し、個人利用のデバッグ用途
 /// として十分な保持期間になる（環境依存ではなく本ログの用途規模から導いた設計値）。
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
-
-/// ログファイルに要求する権限（所有者のみ読み書き）。プロンプト本文が含まれ得る
-/// ため、マルチユーザー環境で他ユーザーに読まれないようにする。
-const LOG_FILE_MODE: u32 = 0o600;
 
 /// デバッグログファイルパス。
 ///
@@ -81,7 +62,8 @@ fn should_rotate(current_size_bytes: u64) -> bool {
 ///
 /// symlink 攻撃対策として `symlink_metadata`（lstat 相当、symlink を追跡しない）
 /// でサイズを確認する。symlink 等の通常ファイルでない実体はここでは何もせず、
-/// 後続の `append_lines_to` の `O_NOFOLLOW` open に判断を委ねる（そこで安全に失敗する）。
+/// 後続の `secure_log::open_hardened` の `O_NOFOLLOW` open に判断を委ねる
+/// （そこで安全に失敗する）。
 fn rotate_if_needed(path: &Path) {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
         return;
@@ -89,8 +71,7 @@ fn rotate_if_needed(path: &Path) {
     if meta.is_file() && should_rotate(meta.len()) {
         let rotated = rotated_log_path(path);
         if std::fs::rename(path, &rotated).is_ok() {
-            let _ =
-                std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(LOG_FILE_MODE));
+            let _ = std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(0o600));
         }
     }
 }
@@ -133,31 +114,24 @@ fn format_selection_line(idx: usize, prompt: &Prompt) -> String {
 }
 
 /// `lines` を `path` に追記する（`append_lines` の本体、path を差し替えられるよう
-/// 分離しているのはローテーション・symlink 拒否を実ファイルなしでテストするため）。
+/// 分離しているのはローテーションを実ファイルなしでテストするため）。
 ///
-/// 上限超過時はローテーションしてから、`O_NOFOLLOW` 付きで open する。
-/// open 失敗時（symlink 経由の拒否を含む）はサイレントに何もしない
-/// （デバッグ用途のログであり、本処理を止める理由にはならない）。
+/// 上限超過時はローテーションしてから、`secure_log::open_hardened` で安全に
+/// open する（symlink 経由の拒否・権限強制は secure_log.rs 側の責務）。
+/// open 失敗時はサイレントに何もしない（デバッグ用途のログであり、本処理を
+/// 止める理由にはならない）。複数行は 1 回の `write_all` にまとめ、行数分の
+/// write(2) 呼び出しを避ける。
 fn append_lines_to(path: &Path, lines: &[String]) {
     if lines.is_empty() {
         return;
     }
     rotate_if_needed(path);
-    let Ok(mut file) = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(LOG_FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-    else {
+    let Ok(mut file) = secure_log::open_hardened(path) else {
         return;
     };
-    // mode() は umask に削られる方向にしか効かず、既存ファイルには適用されない
-    // ため、open 成功のたびに明示的に強制する（自己修復）。
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(LOG_FILE_MODE));
-    for line in lines {
-        let _ = writeln!(file, "{line}");
-    }
+    let mut buf = lines.join("\n");
+    buf.push('\n');
+    let _ = file.write_all(buf.as_bytes());
 }
 
 fn append_lines(lines: &[String]) {
@@ -232,19 +206,20 @@ mod tests {
 
     /// `log_startup` / `log_selection` が実際にディスク上のログファイルへ
     /// 追記することを確認する（フォーマット純粋関数のテストでは open/write の
-    /// 実際の I/O 経路は検証できないため）。injector.rs の
-    /// `spawn_injector_with_existing_program_returns_ok` と同様、実 /tmp パスへの
-    /// 副作用を許容するテスト。
+    /// 実際の I/O 経路は検証できないため）。実 `/tmp` パスを使うが、テスト前後の
+    /// 内容を比較し追記された分だけを検証したうえで元のファイル内容に復元する
+    /// ことで、テスト実行のたびに実ファイルが際限なく肥大化しないようにする。
     #[test]
     fn log_startup_and_log_selection_write_to_real_debug_log_file() {
+        let path = debug_log_path();
+        let original = std::fs::read_to_string(&path).unwrap_or_default();
+
         let marker = "debug-log-real-io-check-9f3c2a";
         let prompts = vec![make_prompt(Source::Claude, marker, Some(0))];
-
         log_startup(&prompts);
         log_selection(0, &prompts[0]);
 
-        let contents =
-            std::fs::read_to_string(debug_log_path()).expect("デバッグログの読み込みに失敗");
+        let contents = std::fs::read_to_string(&path).expect("デバッグログの読み込みに失敗");
         assert!(
             contents.contains(&format!("STARTUP #1 [Claude] {marker}")),
             "STARTUP 行が実ファイルに書き込まれていない: {contents}"
@@ -253,6 +228,8 @@ mod tests {
             contents.contains(&format!("SELECTED idx=0 [Claude] {marker}")),
             "SELECTED 行が実ファイルに書き込まれていない: {contents}"
         );
+
+        std::fs::write(&path, original).expect("テスト前の内容への復元に失敗");
     }
 
     #[test]
@@ -365,45 +342,6 @@ mod tests {
     }
 
     #[test]
-    fn append_lines_to_creates_file_with_owner_only_permissions() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
-
-        append_lines_to(&path, &["line".to_string()]);
-
-        let mode = std::fs::metadata(&path)
-            .expect("metadata 取得に失敗")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
-        );
-    }
-
-    #[test]
-    fn append_lines_to_tightens_permissions_of_preexisting_world_readable_file() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
-        std::fs::write(&path, "pre-existing content from before this fix").expect("下準備に失敗");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("下準備の chmod に失敗");
-
-        append_lines_to(&path, &["new entry".to_string()]);
-
-        let mode = std::fs::metadata(&path)
-            .expect("metadata 取得に失敗")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"
-        );
-    }
-
-    #[test]
     fn single_line_handles_multibyte_and_emoji_without_panicking() {
         let mixed = "日本語のプロンプト🎉\n改行を含む\r次の行";
         let result = single_line(mixed);
@@ -413,8 +351,10 @@ mod tests {
         assert!(result.contains("次の行"));
     }
 
-    /// symlink 経由の open が `O_NOFOLLOW` により拒否され、symlink の指す先の
-    /// ファイルが書き換えられないことを確認する（CWE-59 対策の実効性テスト）。
+    /// `append_lines_to` は `rotate_if_needed` と `secure_log::open_hardened` を
+    /// 組み合わせて呼ぶため、両者の組み合わせで symlink 経由の書き込みが
+    /// 拒否されることを統合的に確認する（各関数単体のテストは
+    /// secure_log.rs / 本ファイルの他テストでカバー済み）。
     #[test]
     fn append_lines_to_refuses_to_follow_symlink() {
         let dir = tempfile::tempdir().expect("tempdir 作成に失敗");

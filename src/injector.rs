@@ -35,16 +35,11 @@
 //! macOS 通知でアクセシビリティ設定を案内する。
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
-use std::fs::OpenOptions;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use crate::secure_log;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-
-/// ログファイルに要求する権限（所有者のみ読み書き）。debug_log.rs と同じ理由で、
-/// マルチユーザー環境で他ユーザーに読まれないようにする。
-const LOG_FILE_MODE: u32 = 0o600;
 
 /// osascript の stderr ログファイルパス。
 ///
@@ -55,31 +50,13 @@ fn osascript_log_path() -> PathBuf {
     PathBuf::from(format!("/tmp/{uid}.agent-history-pick.osascript.log"))
 }
 
-/// `path` を追記モードで open する（`open_stderr_log` の本体。symlink 拒否の
-/// 成否をファイルオープンの成功/失敗として直接テストできるよう分離している）。
-///
-/// UID から決定的に導出される予測可能パスのため、マルチユーザー環境では他ユーザーが
-/// 事前に symlink を仕込む競合（CWE-59 / TOCTOU）が理論上成立する。`O_NOFOLLOW` で
-/// symlink 経由の open を OS レベルで拒否する。`mode()` は umask に削られる方向
-/// にしか効かず既存ファイルには適用されないため、open 成功後に `set_permissions`
-/// で明示的に強制する（自己修復。debug_log.rs と同じ対策）。
-fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
-    let file = OpenOptions::new()
-        .append(true)
-        .create(true)
-        .mode(LOG_FILE_MODE)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    let _ = file.set_permissions(std::fs::Permissions::from_mode(LOG_FILE_MODE));
-    Ok(file)
-}
-
-/// `path` を stderr リダイレクト先として open する。
+/// `path` を stderr リダイレクト先として open する。symlink 攻撃対策・権限強制は
+/// `secure_log::open_hardened` に委ねる（debug_log.rs と共通の方針）。
 ///
 /// open 失敗時（symlink 経由の拒否を含む）は /dev/null にフォールバックし、
 /// 本機能を止めない。
 fn open_stderr_log(path: &Path) -> Stdio {
-    open_log_file(path)
+    secure_log::open_hardened(path)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null())
 }
@@ -332,76 +309,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_log_file_creates_regular_file() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("osascript.log");
-
-        let result = open_log_file(&path);
-        assert!(result.is_ok(), "通常パスの open に失敗した: {result:?}");
-        assert!(path.exists(), "ログファイルが作成されていない");
-    }
-
-    #[test]
-    fn open_log_file_creates_file_with_owner_only_permissions() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("osascript.log");
-
-        open_log_file(&path).expect("open に失敗");
-
-        let mode = std::fs::metadata(&path)
-            .expect("metadata 取得に失敗")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
-        );
-    }
-
-    #[test]
-    fn open_log_file_tightens_permissions_of_preexisting_world_readable_file() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("osascript.log");
-        std::fs::write(&path, "pre-existing content from before this fix").expect("下準備に失敗");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
-            .expect("下準備の chmod に失敗");
-
-        open_log_file(&path).expect("open に失敗");
-
-        let mode = std::fs::metadata(&path)
-            .expect("metadata 取得に失敗")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"
-        );
-    }
-
-    /// symlink 経由の open が `O_NOFOLLOW` により拒否されることを確認する
-    /// （CWE-59 対策の実効性テスト）。
-    #[test]
-    fn open_log_file_refuses_to_follow_symlink() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let victim = dir.path().join("victim.txt");
-        let log_path = dir.path().join("osascript.log");
-        std::fs::write(&victim, "original victim content").expect("victim 作成に失敗");
-        symlink(&victim, &log_path).expect("symlink 作成に失敗");
-
-        let result = open_log_file(&log_path);
-        assert!(
-            result.is_err(),
-            "symlink 経由の open が O_NOFOLLOW で拒否されなかった"
-        );
-        assert_eq!(
-            std::fs::read_to_string(&victim).expect("victim 読み込みに失敗"),
-            "original victim content",
-            "symlink 経由で victim ファイルが書き換えられてしまった"
-        );
-    }
+    // symlink 拒否・ファイル権限の自己修復は secure_log.rs のテストでカバー済み
+    // （open_stderr_log は secure_log::open_hardened のごく薄いラッパーであり、
+    // spawn_injector_with_existing_program_returns_ok が実際に open_stderr_log
+    // を経由するため、配線自体もそこで確認できている）。
 }
