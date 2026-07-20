@@ -349,7 +349,11 @@ mod tests {
 
         open_log_file(&path).expect("open に失敗");
 
-        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata 取得に失敗")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o600,
             "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
@@ -366,7 +370,11 @@ mod tests {
 
         open_log_file(&path).expect("open に失敗");
 
-        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata 取得に失敗")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o600,
             "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"

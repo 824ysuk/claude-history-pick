@@ -89,7 +89,8 @@ fn rotate_if_needed(path: &Path) {
     if meta.is_file() && should_rotate(meta.len()) {
         let rotated = rotated_log_path(path);
         if std::fs::rename(path, &rotated).is_ok() {
-            let _ = std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(LOG_FILE_MODE));
+            let _ =
+                std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(LOG_FILE_MODE));
         }
     }
 }
@@ -242,7 +243,8 @@ mod tests {
         log_startup(&prompts);
         log_selection(0, &prompts[0]);
 
-        let contents = std::fs::read_to_string(debug_log_path()).expect("デバッグログの読み込みに失敗");
+        let contents =
+            std::fs::read_to_string(debug_log_path()).expect("デバッグログの読み込みに失敗");
         assert!(
             contents.contains(&format!("STARTUP #1 [Claude] {marker}")),
             "STARTUP 行が実ファイルに書き込まれていない: {contents}"
@@ -307,7 +309,9 @@ mod tests {
         let rotated = rotated_log_path(&path);
         assert!(rotated.exists(), "閾値超過時に .1 へ退避されていない");
         assert_eq!(
-            std::fs::read_to_string(&rotated).expect("rotated 読み込みに失敗").len(),
+            std::fs::read_to_string(&rotated)
+                .expect("rotated 読み込みに失敗")
+                .len(),
             MAX_LOG_BYTES as usize,
             "退避先に旧内容が残っていない"
         );
@@ -367,7 +371,11 @@ mod tests {
 
         append_lines_to(&path, &["line".to_string()]);
 
-        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata 取得に失敗")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o600,
             "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
@@ -384,7 +392,11 @@ mod tests {
 
         append_lines_to(&path, &["new entry".to_string()]);
 
-        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        let mode = std::fs::metadata(&path)
+            .expect("metadata 取得に失敗")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(
             mode, 0o600,
             "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"
