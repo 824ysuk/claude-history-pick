@@ -198,6 +198,13 @@ mod tests {
     /// 更新漏れ（一部のテストだけ古い値のまま残る不整合）を防ぐ。
     const TEST_TMP_PATH: &str = "/tmp/preview-abc.txt";
 
+    /// `build_preview_cmd(TEST_TMP_PATH)` は複数テストで同一の呼び出しを
+    /// 繰り返すため 1 箇所に集約する（`build_preview_cmd` は純粋関数のため、
+    /// 経由しても返り値は直接呼び出しと完全に同一）。
+    fn preview_cmd_fixture() -> String {
+        build_preview_cmd(TEST_TMP_PATH)
+    }
+
     #[test]
     fn display_line_single_line() {
         assert_eq!(display_line("hello world"), "hello world");
@@ -279,7 +286,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_includes_index_plus_one() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("NR=={1}+1"),
             "0-based → 1-based 補正が欠落: {cmd}"
@@ -288,7 +295,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_quotes_tmp_path() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains(&format!("'{TEST_TMP_PATH}'")),
             "tmp_path がシェルクォートされていない: {cmd}"
@@ -297,7 +304,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_restores_newlines_via_gsub() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("gsub(/\\037/, \"\\n\", $1)"),
             "gsub による改行復元が欠落: {cmd}"
@@ -306,7 +313,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_restores_tabs_via_gsub() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("gsub(/\\036/, \"\\t\", $1)"),
             "gsub によるタブ復元が欠落: {cmd}"
@@ -324,7 +331,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_uses_tab_as_field_separator() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("-F'\\t'"),
             "awk フィールド区切り -F'\\t' が欠落: {cmd}"
@@ -437,7 +444,7 @@ mod tests {
     #[test]
     fn build_preview_cmd_header_always_includes_source_column() {
         // $3（source label）は常にヘッダへ含む。
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("header = \"[\" $3 \"]\""),
             "source label をヘッダに含める節が欠落: {cmd}"
@@ -446,7 +453,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_header_appends_timestamp_when_present() {
-        let cmd = build_preview_cmd(TEST_TMP_PATH);
+        let cmd = preview_cmd_fixture();
         assert!(
             cmd.contains("if ($2 != \"\") header = header \" [\" $2 \"]\""),
             "タイムスタンプ追記節が欠落: {cmd}"
@@ -455,16 +462,28 @@ mod tests {
 
     // ─── fzf 起動引数 ───────────────────────────────────────────────────────
 
+    /// `build_fzf_args` の引数のうち、テストが検証したい対象でないときの
+    /// プレースホルダ値（値そのものに意味はない）。
+    const DUMMY_PREVIEW_CMD: &str = "dummy-preview-cmd";
+    const DUMMY_PROMPT_LABEL: &str = "History > ";
+
+    /// preview_cmd/prompt_label の具体値が結果に影響しないテスト
+    /// （--ansi/--no-sort/--delimiter 等、固定オプションの有無だけを見る）向けの
+    /// 共通呼び出し。
+    fn fzf_args_fixture() -> Vec<&'static str> {
+        build_fzf_args(DUMMY_PREVIEW_CMD, DUMMY_PROMPT_LABEL)
+    }
+
     #[test]
     fn build_fzf_args_includes_ansi() {
         // --ansi がないと source prefix の色エスケープが生の文字列として表示されてしまう。
-        let args = build_fzf_args("dummy-preview-cmd", "History > ");
+        let args = fzf_args_fixture();
         assert!(args.contains(&"--ansi"), "実際: {args:?}");
     }
 
     #[test]
     fn build_fzf_args_includes_no_sort() {
-        let args = build_fzf_args("dummy-preview-cmd", "History > ");
+        let args = fzf_args_fixture();
         assert!(args.contains(&"--no-sort"), "実際: {args:?}");
     }
 
@@ -473,7 +492,7 @@ mod tests {
         // stdin は "{index}\t{...}" 形式で書き込む（pick 関数）ため、fzf 側の
         // --delimiter もタブでなければならない。ここがずれるとインデックス列の
         // 逆引きが壊れる（fzf は最初のフィールドを表示から除外できなくなる）。
-        let args = build_fzf_args("dummy-preview-cmd", "History > ");
+        let args = fzf_args_fixture();
         let delim_idx = args
             .iter()
             .position(|a| *a == "--delimiter")
@@ -483,13 +502,13 @@ mod tests {
 
     #[test]
     fn build_fzf_args_embeds_preview_cmd_verbatim() {
-        let args = build_fzf_args("my-unique-preview-command", "History > ");
+        let args = build_fzf_args("my-unique-preview-command", DUMMY_PROMPT_LABEL);
         assert!(args.contains(&"my-unique-preview-command"));
     }
 
     #[test]
     fn build_fzf_args_embeds_prompt_label_verbatim() {
-        let args = build_fzf_args("dummy-preview-cmd", "History [test] > ");
+        let args = build_fzf_args(DUMMY_PREVIEW_CMD, "History [test] > ");
         assert!(args.contains(&"History [test] > "));
     }
 

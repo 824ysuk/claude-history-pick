@@ -152,6 +152,15 @@ mod tests {
     use crate::history::Source;
     use std::os::unix::fs::symlink;
 
+    /// `append_lines_to` 系テストで使い回す一時ディレクトリ + `debug.log` パス。
+    /// `TempDir` は Drop でディレクトリごと削除されるため、返り値として保持させて
+    /// 呼び出し側のスコープが終わるまで生存させる。
+    fn temp_debug_log_path() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("debug.log");
+        (dir, path)
+    }
+
     #[test]
     fn startup_lines_are_capped_at_limit() {
         let prompts: Vec<Prompt> = (0..15)
@@ -251,8 +260,7 @@ mod tests {
 
     #[test]
     fn append_lines_to_creates_file_and_appends() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
+        let (_dir, path) = temp_debug_log_path();
 
         append_lines_to(&path, &["line 1".to_string()]);
         append_lines_to(&path, &["line 2".to_string()]);
@@ -263,8 +271,7 @@ mod tests {
 
     #[test]
     fn append_lines_to_empty_lines_does_not_create_file() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
+        let (_dir, path) = temp_debug_log_path();
 
         append_lines_to(&path, &[]);
 
@@ -273,8 +280,7 @@ mod tests {
 
     #[test]
     fn append_lines_to_rotates_when_threshold_exceeded() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
+        let (_dir, path) = temp_debug_log_path();
 
         std::fs::write(&path, "x".repeat(MAX_LOG_BYTES as usize)).expect("下準備の書き込みに失敗");
 
@@ -298,8 +304,7 @@ mod tests {
 
     #[test]
     fn append_lines_to_below_threshold_does_not_rotate() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
+        let (_dir, path) = temp_debug_log_path();
         std::fs::write(&path, "small content").expect("下準備の書き込みに失敗");
 
         append_lines_to(&path, &["new entry".to_string()]);
@@ -316,8 +321,7 @@ mod tests {
 
     #[test]
     fn append_lines_to_rotation_overwrites_stale_generation_instead_of_merging() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("debug.log");
+        let (_dir, path) = temp_debug_log_path();
         let rotated = rotated_log_path(&path);
 
         std::fs::write(&rotated, "stale generation from a previous rotation")
@@ -354,9 +358,8 @@ mod tests {
     /// secure_log.rs / 本ファイルの他テストでカバー済み）。
     #[test]
     fn append_lines_to_refuses_to_follow_symlink() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let (dir, log_path) = temp_debug_log_path();
         let victim = dir.path().join("victim.txt");
-        let log_path = dir.path().join("debug.log");
         std::fs::write(&victim, "original victim content").expect("victim 作成に失敗");
         symlink(&victim, &log_path).expect("symlink 作成に失敗");
 

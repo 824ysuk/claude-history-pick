@@ -155,6 +155,13 @@ fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::i
 mod tests {
     use super::*;
 
+    /// `initial_delay` の具体値がテスト結果に影響しないケース向けの共通呼び出し
+    /// （delay 値そのものを検証する `delay_value_is_embedded_correctly` /
+    /// `delay_zero_is_formatted` を除く全テストで使う）。
+    fn script_args_fixture() -> Vec<String> {
+        build_script_args(Duration::from_millis(100))
+    }
+
     #[test]
     fn delay_value_is_embedded_correctly() {
         let args = build_script_args(Duration::from_millis(100));
@@ -169,7 +176,7 @@ mod tests {
 
     #[test]
     fn max_attempts_is_40() {
-        let args = build_script_args(Duration::from_millis(500));
+        let args = script_args_fixture();
         assert!(
             args.iter().any(|s| s == "set maxAttempts to 40"),
             "maxAttempts 行が見つからない: {args:?}"
@@ -178,7 +185,7 @@ mod tests {
 
     #[test]
     fn fallback_notification_text_is_present() {
-        let args = build_script_args(Duration::from_millis(500));
+        let args = script_args_fixture();
         let has_notification = args
             .iter()
             .any(|s| s.contains("display notification") && s.contains("agent-history-pick ⚠"));
@@ -192,7 +199,7 @@ mod tests {
     fn accessibility_error_notification_is_present() {
         // Accessibility 権限拒否時の通知行が存在することを確認する。
         // この行が欠けると TCC 拒否がサイレントになり Issue #37 が再発する。
-        let args = build_script_args(Duration::from_millis(500));
+        let args = script_args_fixture();
         assert!(
             args.iter()
                 .any(|s| s.contains("アクセシビリティ") && s.contains("display notification")),
@@ -204,7 +211,7 @@ mod tests {
     fn try_on_error_block_wraps_keystroke() {
         // `try` が `keystroke` より前、`on error` が `keystroke` より後に存在することで
         // keystroke が try/on error ブロックに包まれていることを検証する。
-        let args = build_script_args(Duration::from_millis(500));
+        let args = script_args_fixture();
         let try_pos = args.iter().position(|s| s == "try");
         let keystroke_pos = args
             .iter()
@@ -233,7 +240,7 @@ mod tests {
 
     #[test]
     fn script_args_count_is_25() {
-        let args = build_script_args(Duration::from_millis(500));
+        let args = script_args_fixture();
         assert_eq!(
             args.len(),
             25,
@@ -246,7 +253,7 @@ mod tests {
     fn zed_activate_line_is_present() {
         // Zed をフロントに持ち上げる行が欠けると activate されず、
         // ポーリングがタイムアウトして fallback 通知に流れる。
-        let args = build_script_args(Duration::from_millis(100));
+        let args = script_args_fixture();
         assert!(
             args.iter()
                 .any(|s| s == "tell application \"Zed\" to activate"),
@@ -258,7 +265,7 @@ mod tests {
     fn cmd_r_keystroke_line_is_present() {
         // この行が terminal::Paste 発火本体。`"r"` → 別キー、`command` → `option` 等の
         // 改変で paste が無効化されるが、行数や delay の検証では捕まらない。
-        let args = build_script_args(Duration::from_millis(100));
+        let args = script_args_fixture();
         assert!(
             args.iter()
                 .any(|s| s == "keystroke \"r\" using command down"),
@@ -269,7 +276,7 @@ mod tests {
     #[test]
     fn polling_delay_is_50ms() {
         // ポーリング間隔。maxAttempts(40) × 0.05s = 2s の総待機時間設計を支える。
-        let args = build_script_args(Duration::from_millis(100));
+        let args = script_args_fixture();
         assert!(
             args.iter().any(|s| s == "delay 0.05"),
             "ポーリング間隔 (delay 0.05) 行が見つからない: {args:?}"
@@ -301,7 +308,7 @@ mod tests {
     fn post_focus_settle_delay_is_300ms() {
         // フォーカス取得直後の settle 時間。これが消えると Zed の入力受付前に
         // keystroke が送られ paste が取りこぼされる。
-        let args = build_script_args(Duration::from_millis(100));
+        let args = script_args_fixture();
         assert!(
             args.iter().any(|s| s == "delay 0.3"),
             "フォーカス取得後 settle (delay 0.3) 行が見つからない: {args:?}"
