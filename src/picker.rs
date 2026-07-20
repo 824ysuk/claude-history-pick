@@ -79,7 +79,9 @@ pub fn pick(prompts: &[Prompt], had_unexpected_error: bool) -> Option<String> {
         }
         // fzf は --with-nth でも行全体を返すため "{index}\t{display}" をパース
         let idx: usize = trimmed.split('\t').next()?.parse().ok()?;
-        prompts.get(idx).map(|p| p.full_text().to_string())
+        let prompt = prompts.get(idx)?;
+        crate::debug_log::log_selection(idx, prompt);
+        Some(prompt.full_text().to_string())
     } else {
         // exit code 130 = Ctrl-C / Esc によるキャンセル
         None

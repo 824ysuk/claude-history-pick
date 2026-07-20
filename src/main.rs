@@ -19,6 +19,7 @@
 mod claude;
 mod clipboard;
 mod codex;
+mod debug_log;
 mod guard;
 mod history;
 mod injector;
@@ -227,6 +228,7 @@ fn main() {
     let mut all_prompts = claude_prompts;
     all_prompts.extend(codex_prompts);
     let prompts = history::merge_sort_dedup(all_prompts);
+    debug_log::log_startup(&prompts);
 
     if prompts.is_empty() {
         eprintln!("履歴が見つかりませんでした");
