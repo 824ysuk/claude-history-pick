@@ -22,6 +22,7 @@
 
 use crate::history::Prompt;
 use crate::secure_log;
+use crate::tmp_paths::uid_scoped_tmp_path;
 use chrono::Local;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -38,12 +39,8 @@ const STARTUP_LOG_LIMIT: usize = 10;
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 
 /// デバッグログファイルパス。
-///
-/// UID を含めることでマルチユーザー環境での衝突を防ぐ（injector.rs の
-/// osascript_log_path と同パターン）。
 fn debug_log_path() -> PathBuf {
-    let uid = nix::unistd::getuid();
-    PathBuf::from(format!("/tmp/{uid}.agent-history-pick.debug.log"))
+    uid_scoped_tmp_path("debug.log")
 }
 
 /// ローテーション先のパス（`.1` を 1 世代だけ保持）。

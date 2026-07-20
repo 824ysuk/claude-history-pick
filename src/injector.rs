@@ -36,6 +36,7 @@
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
 use crate::secure_log;
+use crate::tmp_paths::uid_scoped_tmp_path;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -43,11 +44,9 @@ use std::time::Duration;
 
 /// osascript の stderr ログファイルパス。
 ///
-/// UID を含めることでマルチユーザー環境での衝突を防ぐ。
 /// Accessibility 拒否時の `osascript is not allowed to send keystrokes` エラーを記録する。
 fn osascript_log_path() -> PathBuf {
-    let uid = nix::unistd::getuid();
-    PathBuf::from(format!("/tmp/{uid}.agent-history-pick.osascript.log"))
+    uid_scoped_tmp_path("osascript.log")
 }
 
 /// `path` を stderr リダイレクト先として open する。symlink 攻撃対策・権限強制は

@@ -25,6 +25,7 @@ mod history;
 mod injector;
 mod picker;
 mod secure_log;
+mod tmp_paths;
 
 use history::Prompt;
 use std::io;

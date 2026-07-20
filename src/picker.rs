@@ -192,6 +192,12 @@ mod tests {
     use crate::history::test_support::{make_prompt, make_prompt_with_full_text};
     use crate::history::Source;
 
+    /// テスト全体で使い回す代表的な一時ファイルパス（具体的な値そのものに意味は
+    /// なく、shell quote / preview コマンド組み立てが「何らかの plain なパス」を
+    /// 正しく扱えるかの確認用）。1 箇所に集約することで、値を変える際の
+    /// 更新漏れ（一部のテストだけ古い値のまま残る不整合）を防ぐ。
+    const TEST_TMP_PATH: &str = "/tmp/preview-abc.txt";
+
     #[test]
     fn display_line_single_line() {
         assert_eq!(display_line("hello world"), "hello world");
@@ -245,8 +251,8 @@ mod tests {
     #[test]
     fn posix_shell_quote_plain_path() {
         assert_eq!(
-            posix_shell_quote("/tmp/preview-abc.txt"),
-            "'/tmp/preview-abc.txt'"
+            posix_shell_quote(TEST_TMP_PATH),
+            format!("'{TEST_TMP_PATH}'")
         );
     }
 
@@ -273,7 +279,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_includes_index_plus_one() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("NR=={1}+1"),
             "0-based → 1-based 補正が欠落: {cmd}"
@@ -282,16 +288,16 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_quotes_tmp_path() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
-            cmd.contains("'/tmp/preview-abc.txt'"),
+            cmd.contains(&format!("'{TEST_TMP_PATH}'")),
             "tmp_path がシェルクォートされていない: {cmd}"
         );
     }
 
     #[test]
     fn build_preview_cmd_restores_newlines_via_gsub() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("gsub(/\\037/, \"\\n\", $1)"),
             "gsub による改行復元が欠落: {cmd}"
@@ -300,7 +306,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_restores_tabs_via_gsub() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("gsub(/\\036/, \"\\t\", $1)"),
             "gsub によるタブ復元が欠落: {cmd}"
@@ -318,7 +324,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_uses_tab_as_field_separator() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("-F'\\t'"),
             "awk フィールド区切り -F'\\t' が欠落: {cmd}"
@@ -431,7 +437,7 @@ mod tests {
     #[test]
     fn build_preview_cmd_header_always_includes_source_column() {
         // $3（source label）は常にヘッダへ含む。
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("header = \"[\" $3 \"]\""),
             "source label をヘッダに含める節が欠落: {cmd}"
@@ -440,7 +446,7 @@ mod tests {
 
     #[test]
     fn build_preview_cmd_header_appends_timestamp_when_present() {
-        let cmd = build_preview_cmd("/tmp/preview-abc.txt");
+        let cmd = build_preview_cmd(TEST_TMP_PATH);
         assert!(
             cmd.contains("if ($2 != \"\") header = header \" [\" $2 \"]\""),
             "タイムスタンプ追記節が欠落: {cmd}"

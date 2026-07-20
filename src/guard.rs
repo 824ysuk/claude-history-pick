@@ -26,16 +26,17 @@
 //! 競合する 2 インスタンスが同時に「ロックなし」と判定して並走する
 //! TOCTOU を防ぐ。
 
+use crate::tmp_paths::uid_scoped_tmp_path;
 use nix::errno::Errno;
 use nix::sys::signal::{kill, Signal};
-use nix::unistd::{getuid, Pid};
+use nix::unistd::Pid;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 fn lock_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/{}.agent-history-pick.lock", getuid()))
+    uid_scoped_tmp_path("lock")
 }
 
 /// 単一インスタンス権を取得する。
