@@ -7,6 +7,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Cargo.toml の [[bin]] name と一致させる。ジョブ・ステップをまたいで同じ値を
+  # 参照するための単一の定義元（他の箇所でバイナリ名をハードコードしない）。
+  BINARY_NAME: agent-history-pick
 
 jobs:
   build:
@@ -35,22 +38,22 @@ jobs:
 
       - name: package
         run: |
-          ASSET="claude-history-pick-${{ matrix.target }}.tar.gz"
-          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" claude-history-pick
+          ASSET="${BINARY_NAME}-${{ matrix.target }}.tar.gz"
+          tar -czf "$ASSET" -C "target/${{ matrix.target }}/release" "$BINARY_NAME"
           shasum -a 256 "$ASSET" > "${ASSET}.sha256"
 
       - name: upload-release-asset
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            claude-history-pick-${{ matrix.target }}.tar.gz
-            claude-history-pick-${{ matrix.target }}.tar.gz.sha256
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.tar.gz.sha256
 
       - name: upload-binary-artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/claude-history-pick
+          path: target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}
 
   universal:
     needs: build
@@ -70,15 +73,15 @@ jobs:
 
       - name: create-universal-binary
         run: |
-          lipo -create aarch64/claude-history-pick x86_64/claude-history-pick \
-            -output claude-history-pick
-          ASSET="claude-history-pick-universal-apple-darwin.tar.gz"
-          tar -czf "$ASSET" claude-history-pick
+          lipo -create "aarch64/${BINARY_NAME}" "x86_64/${BINARY_NAME}" \
+            -output "$BINARY_NAME"
+          ASSET="${BINARY_NAME}-universal-apple-darwin.tar.gz"
+          tar -czf "$ASSET" "$BINARY_NAME"
           shasum -a 256 "$ASSET" > "${ASSET}.sha256"
 
       - name: upload-universal-release-asset
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
-            claude-history-pick-universal-apple-darwin.tar.gz
-            claude-history-pick-universal-apple-darwin.tar.gz.sha256
+            ${{ env.BINARY_NAME }}-universal-apple-darwin.tar.gz
+            ${{ env.BINARY_NAME }}-universal-apple-darwin.tar.gz.sha256

@@ -50,10 +50,18 @@ mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
-    #[test]
-    fn open_hardened_creates_file_with_owner_only_permissions() {
+    /// テスト全体で使い回す一時ディレクトリ + ログファイルパス。`TempDir` は
+    /// Drop でディレクトリごと削除されるため、返り値として保持させて呼び出し
+    /// 側のスコープが終わるまで生存させる。
+    fn temp_log_path() -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
         let path = dir.path().join("log");
+        (dir, path)
+    }
+
+    #[test]
+    fn open_hardened_creates_file_with_owner_only_permissions() {
+        let (_dir, path) = temp_log_path();
 
         open_hardened(&path).expect("open に失敗");
 
@@ -70,8 +78,7 @@ mod tests {
 
     #[test]
     fn open_hardened_tightens_permissions_of_preexisting_world_readable_file() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
-        let path = dir.path().join("log");
+        let (_dir, path) = temp_log_path();
         std::fs::write(&path, "pre-existing content from before this fix").expect("下準備に失敗");
         std::fs::set_permissions(&path, Permissions::from_mode(0o644))
             .expect("下準備の chmod に失敗");
@@ -93,9 +100,8 @@ mod tests {
     /// ファイルが書き換えられないことを確認する（CWE-59 対策の実効性テスト）。
     #[test]
     fn open_hardened_refuses_to_follow_symlink() {
-        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let (dir, log_path) = temp_log_path();
         let victim = dir.path().join("victim.txt");
-        let log_path = dir.path().join("log");
         std::fs::write(&victim, "original victim content").expect("victim 作成に失敗");
         symlink(&victim, &log_path).expect("symlink 作成に失敗");
 

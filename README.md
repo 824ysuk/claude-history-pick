@@ -83,7 +83,7 @@ PR マージ後や `git pull` 後は **`cargo build --release` を実行して�
 シムリンクは `target/release/` を直接指しているため再作成不要。
 
 ```bash
-cd ~/Projects/claude-history-pick
+cd ~/Projects/agent-history-pick
 git pull origin main
 cargo build --release
 ```

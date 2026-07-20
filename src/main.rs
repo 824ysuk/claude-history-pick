@@ -25,6 +25,7 @@ mod history;
 mod injector;
 mod picker;
 mod secure_log;
+mod tmp_paths;
 
 use history::Prompt;
 use std::io;
@@ -282,6 +283,14 @@ mod tests {
         std::env::remove_var("CODEX_HOME");
     }
 
+    /// `load_source` のテストで「実際には open されない・値そのものに意味がない」
+    /// パス引数として使い回す（loader クロージャがパスを無視するケース向け）。
+    const UNUSED_PATH: &str = "/unused";
+
+    /// `load_source` のテストで NotFound エラーを発生させるための、
+    /// 存在しないことが確実なパス。
+    const NONEXISTENT_HISTORY_PATH: &str = "/definitely/does/not/exist/history.jsonl";
+
     #[test]
     fn claude_env_var_set_returns_custom_path_and_explicit_origin() {
         let _guard = ENV_MUTEX.lock().unwrap();
@@ -474,7 +483,7 @@ mod tests {
     #[test]
     fn load_source_returns_loader_result_on_success() {
         let (result, had_error) =
-            load_source("Test", Path::new("/unused"), PathOrigin::Default, |_| {
+            load_source("Test", Path::new(UNUSED_PATH), PathOrigin::Default, |_| {
                 Ok(vec![history::test_support::make_prompt(
                     history::Source::Claude,
                     "ok",
@@ -490,7 +499,7 @@ mod tests {
         // デフォルトパス（PathOrigin::Default）で NotFound は非致命: 空 Vec を返し継続する。
         let (result, had_error) = load_source(
             "Test",
-            Path::new("/definitely/does/not/exist/history.jsonl"),
+            Path::new(NONEXISTENT_HISTORY_PATH),
             PathOrigin::Default,
             claude::load_claude_prompts,
         );
@@ -509,7 +518,7 @@ mod tests {
         // had_unexpected_error = true にし、main の exit code 分岐に伝える。
         let (result, had_error) = load_source(
             "Test",
-            Path::new("/definitely/does/not/exist/history.jsonl"),
+            Path::new(NONEXISTENT_HISTORY_PATH),
             PathOrigin::ExplicitEnvVar("TEST_HISTORY_PATH"),
             claude::load_claude_prompts,
         );
@@ -524,7 +533,7 @@ mod tests {
     fn load_source_borrowed_env_var_not_found_is_non_fatal() {
         let (result, had_error) = load_source(
             "Test",
-            Path::new("/definitely/does/not/exist/history.jsonl"),
+            Path::new(NONEXISTENT_HISTORY_PATH),
             PathOrigin::BorrowedEnvVar("TEST_HOME"),
             claude::load_claude_prompts,
         );
@@ -540,7 +549,7 @@ mod tests {
         // 発生はサンドボックス依存のため、io::Error::other で同じ
         // 「NotFound 以外」分岐を代表させる）。
         let (result, had_error) =
-            load_source("Test", Path::new("/unused"), PathOrigin::Default, |_| {
+            load_source("Test", Path::new(UNUSED_PATH), PathOrigin::Default, |_| {
                 Err(io::Error::other("simulated permission denied"))
             });
         assert!(result.is_empty());
@@ -556,12 +565,14 @@ mod tests {
         // 「単に履歴がない」場合と同じ exit(0) にせず exit(1) にすべき。main() 自体は
         // process::exit するためユニットテスト不可能なので、その分岐条件となる
         // had_unexpected_error の OR 結合が両方 true を伝播することをここで検証する。
-        let (_, claude_had_error) =
-            load_source("Claude", Path::new("/unused"), PathOrigin::Default, |_| {
-                Err(io::Error::other("simulated permission denied"))
-            });
+        let (_, claude_had_error) = load_source(
+            "Claude",
+            Path::new(UNUSED_PATH),
+            PathOrigin::Default,
+            |_| Err(io::Error::other("simulated permission denied")),
+        );
         let (_, codex_had_error) =
-            load_source("Codex", Path::new("/unused"), PathOrigin::Default, |_| {
+            load_source("Codex", Path::new(UNUSED_PATH), PathOrigin::Default, |_| {
                 Err(io::Error::other("simulated EIO"))
             });
         assert!(claude_had_error && codex_had_error);
