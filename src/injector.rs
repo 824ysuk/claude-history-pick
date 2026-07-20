@@ -36,11 +36,15 @@
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
 
 use std::fs::OpenOptions;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+/// ログファイルに要求する権限（所有者のみ読み書き）。debug_log.rs と同じ理由で、
+/// マルチユーザー環境で他ユーザーに読まれないようにする。
+const LOG_FILE_MODE: u32 = 0o600;
 
 /// osascript の stderr ログファイルパス。
 ///
@@ -56,13 +60,18 @@ fn osascript_log_path() -> PathBuf {
 ///
 /// UID から決定的に導出される予測可能パスのため、マルチユーザー環境では他ユーザーが
 /// 事前に symlink を仕込む競合（CWE-59 / TOCTOU）が理論上成立する。`O_NOFOLLOW` で
-/// symlink 経由の open を OS レベルで拒否する。
+/// symlink 経由の open を OS レベルで拒否する。`mode()` は umask に削られる方向
+/// にしか効かず既存ファイルには適用されないため、open 成功後に `set_permissions`
+/// で明示的に強制する（自己修復。debug_log.rs と同じ対策）。
 fn open_log_file(path: &Path) -> std::io::Result<std::fs::File> {
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(LOG_FILE_MODE)
         .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
+        .open(path)?;
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(LOG_FILE_MODE));
+    Ok(file)
 }
 
 /// `path` を stderr リダイレクト先として open する。
@@ -331,6 +340,37 @@ mod tests {
         let result = open_log_file(&path);
         assert!(result.is_ok(), "通常パスの open に失敗した: {result:?}");
         assert!(path.exists(), "ログファイルが作成されていない");
+    }
+
+    #[test]
+    fn open_log_file_creates_file_with_owner_only_permissions() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("osascript.log");
+
+        open_log_file(&path).expect("open に失敗");
+
+        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
+        );
+    }
+
+    #[test]
+    fn open_log_file_tightens_permissions_of_preexisting_world_readable_file() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("osascript.log");
+        std::fs::write(&path, "pre-existing content from before this fix").expect("下準備に失敗");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("下準備の chmod に失敗");
+
+        open_log_file(&path).expect("open に失敗");
+
+        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"
+        );
     }
 
     /// symlink 経由の open が `O_NOFOLLOW` により拒否されることを確認する

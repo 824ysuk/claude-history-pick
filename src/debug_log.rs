@@ -19,12 +19,27 @@
 //! `open(2)` に `O_NOFOLLOW` を指定し、symlink 経由のオープンを OS レベルで拒否する
 //! （Rust std: `OpenOptionsExt::custom_flags`）。ローテーション判定も
 //! `symlink_metadata`（lstat 相当）で行い、symlink を追跡しない。
+//!
+//! ## ファイル権限
+//!
+//! ログにはプロンプト本文（機密情報を含み得る）がそのまま記録されるため、
+//! 他ユーザーに読まれないよう所有者のみ読み書き可能（0600）に制限する。
+//! `OpenOptionsExt::mode` は生成時の umask で削られる方向にしか効かず、かつ
+//! 既存ファイル（本対策より前に作成され緩い権限のまま残っているものを含む）には
+//! 適用されないため、open 成功後に `set_permissions` で明示的に強制する
+//! （自己修復。ローテーション先の `.1` にも同様に適用する）。
+//!
+//! ## 並行実行についての前提
+//!
+//! `log_startup` / `log_selection` は main.rs の `guard::acquire()` 〜
+//! `guard::release()` の区間内でのみ呼ばれる前提（単一インスタンス保証）であり、
+//! 複数プロセスからの同時書き込みは想定していない。
 
 use crate::history::Prompt;
 use chrono::Local;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// STARTUP ログに残す上位件数。
@@ -36,6 +51,10 @@ const STARTUP_LOG_LIMIT: usize = 10;
 /// ≈ 1.65KB のため、1MB は数百回分の実行履歴に相当し、個人利用のデバッグ用途
 /// として十分な保持期間になる（環境依存ではなく本ログの用途規模から導いた設計値）。
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
+
+/// ログファイルに要求する権限（所有者のみ読み書き）。プロンプト本文が含まれ得る
+/// ため、マルチユーザー環境で他ユーザーに読まれないようにする。
+const LOG_FILE_MODE: u32 = 0o600;
 
 /// デバッグログファイルパス。
 ///
@@ -68,7 +87,10 @@ fn rotate_if_needed(path: &Path) {
         return;
     };
     if meta.is_file() && should_rotate(meta.len()) {
-        let _ = std::fs::rename(path, rotated_log_path(path));
+        let rotated = rotated_log_path(path);
+        if std::fs::rename(path, &rotated).is_ok() {
+            let _ = std::fs::set_permissions(&rotated, std::fs::Permissions::from_mode(LOG_FILE_MODE));
+        }
     }
 }
 
@@ -123,11 +145,15 @@ fn append_lines_to(path: &Path, lines: &[String]) {
     let Ok(mut file) = OpenOptions::new()
         .append(true)
         .create(true)
+        .mode(LOG_FILE_MODE)
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)
     else {
         return;
     };
+    // mode() は umask に削られる方向にしか効かず、既存ファイルには適用されない
+    // ため、open 成功のたびに明示的に強制する（自己修復）。
+    let _ = file.set_permissions(std::fs::Permissions::from_mode(LOG_FILE_MODE));
     for line in lines {
         let _ = writeln!(file, "{line}");
     }
@@ -308,6 +334,71 @@ mod tests {
             std::fs::read_to_string(&path).expect("読み込みに失敗"),
             "small contentnew entry\n"
         );
+    }
+
+    #[test]
+    fn append_lines_to_rotation_overwrites_stale_generation_instead_of_merging() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("debug.log");
+        let rotated = rotated_log_path(&path);
+
+        std::fs::write(&rotated, "stale generation from a previous rotation")
+            .expect("旧 .1 の下準備に失敗");
+        std::fs::write(&path, "x".repeat(MAX_LOG_BYTES as usize)).expect("下準備の書き込みに失敗");
+
+        append_lines_to(&path, &["new entry".to_string()]);
+
+        let rotated_contents = std::fs::read_to_string(&rotated).expect("rotated 読み込みに失敗");
+        assert_eq!(
+            rotated_contents.len(),
+            MAX_LOG_BYTES as usize,
+            "既存の .1 と今回退避分がマージされてしまい、上書きになっていない"
+        );
+        assert!(
+            !rotated_contents.contains("stale generation"),
+            "旧世代の内容が新しい .1 に残ってしまっている"
+        );
+    }
+
+    #[test]
+    fn append_lines_to_creates_file_with_owner_only_permissions() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("debug.log");
+
+        append_lines_to(&path, &["line".to_string()]);
+
+        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "新規作成ファイルの権限が 0600（所有者のみ）になっていない: {mode:o}"
+        );
+    }
+
+    #[test]
+    fn append_lines_to_tightens_permissions_of_preexisting_world_readable_file() {
+        let dir = tempfile::tempdir().expect("tempdir 作成に失敗");
+        let path = dir.path().join("debug.log");
+        std::fs::write(&path, "pre-existing content from before this fix").expect("下準備に失敗");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
+            .expect("下準備の chmod に失敗");
+
+        append_lines_to(&path, &["new entry".to_string()]);
+
+        let mode = std::fs::metadata(&path).expect("metadata 取得に失敗").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "本対策より前に作成された緩い権限のファイルが自己修復されていない: {mode:o}"
+        );
+    }
+
+    #[test]
+    fn single_line_handles_multibyte_and_emoji_without_panicking() {
+        let mixed = "日本語のプロンプト🎉\n改行を含む\r次の行";
+        let result = single_line(mixed);
+        assert!(!result.contains('\n'));
+        assert!(!result.contains('\r'));
+        assert!(result.contains("日本語のプロンプト🎉"));
+        assert!(result.contains("次の行"));
     }
 
     /// symlink 経由の open が `O_NOFOLLOW` により拒否され、symlink の指す先の
