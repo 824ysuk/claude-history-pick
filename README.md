@@ -46,8 +46,12 @@ src/
 ├── picker.rs     — fzf 起動・選択結果取得
 ├── clipboard.rs  — pbcopy でクリップボードにコピー
 ├── guard.rs      — PID ロックファイルによる単一インスタンス保証
-└── injector.rs   — setsid + osascript でキーストローク注入
+├── injector.rs   — setsid + osascript でキーストローク注入
+├── debug_log.rs  — 起動時の統合結果・選択結果を /tmp にデバッグ用途で記録
+└── secure_log.rs — /tmp ログ open の symlink 攻撃対策・権限強制の共通処理
 ```
+
+起動のたびに `/tmp/{uid}.agent-history-pick.debug.log` へ、統合結果の上位10件（`STARTUP`）と実際に選んだ内容（`SELECTED`）が追記される。所有者のみ読み書き可能（0600）、サイズが 1MB を超えると `.1` へ 1 世代だけ退避される。
 
 ## 依存
 
