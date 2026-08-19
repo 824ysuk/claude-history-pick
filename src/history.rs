@@ -39,9 +39,11 @@ impl Source {
 /// `display` は fzf リスト表示用テキスト。`pastedContents` がある行は
 /// プレースホルダ形式（`[Pasted text #1 +48 lines]`）のまま保持する。
 ///
-/// `full_text` はクリップボード・プレビュー用テキスト。
-/// `~/.claude/paste-cache/{contentHash}.txt` が存在する場合はプレースホルダを
-/// 実ペースト内容に展開済み。キャッシュが存在しない場合は `display` と同一。
+/// `full_text` はクリップボード・プレビュー用テキスト。`display` のプレースホルダ
+/// を実ペースト内容へ展開済み。本文はエントリ内に直接埋め込まれている場合と、
+/// `~/.claude/paste-cache/{contentHash}.txt` を参照する場合がある（形式の違いは
+/// `claude.rs` が吸収する）。どちらも解決できないプレースホルダはそのまま残る。
+/// ペーストのない行では `display` と同一。
 ///
 /// `iso_timestamp` は表示用タイムスタンプ文字列（ローカル時刻）。
 ///
