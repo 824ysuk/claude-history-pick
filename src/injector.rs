@@ -34,6 +34,14 @@
 //! AppleScript の `try ... on error ... end try` でこれをキャッチし、
 //! macOS 通知でアクセシビリティ設定を案内する。
 //! osascript の stderr は /tmp/<uid>.agent-history-pick.osascript.log に記録する。
+//!
+//! ## 送信成功時の通知
+//!
+//! keystroke 送信の成否は「Zed が frontmost であること」しか確認しておらず、
+//! 目的の terminal pane に実際に paste されたかは検証できない（Zed に該当 API が
+//! 存在しないため）。この限界の中でも、gotFocus=false・Accessibility 拒否時の
+//! 通知（失敗側）と対称に、keystroke 送信に成功した旨も通知する。文言は
+//! 「送信した」に留め「貼り付けた」と断定しない。
 
 use crate::secure_log;
 use crate::tmp_paths::uid_scoped_tmp_path;
@@ -91,6 +99,7 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
         "tell application \"System Events\"".to_string(),
         "keystroke \"r\" using command down".to_string(),
         "end tell".to_string(),
+        "display notification \"Zed に貼り付け（cmd-r）を送信しました。入力欄に反映されていない場合は cmd-v で貼り付けてください。\" with title \"agent-history-pick\"".to_string(),
         "on error errMsg number errNum".to_string(),
         "display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"agent-history-pick ⚠ Accessibility 権限\"".to_string(),
         "end try".to_string(),
@@ -239,11 +248,62 @@ mod tests {
     }
 
     #[test]
-    fn script_args_count_is_25() {
+    fn paste_sent_notification_is_present() {
+        // keystroke 送信成功時にも通知を出す（gotFocus=false・Accessibility 拒否
+        // 通知との対称化、Issue #76）。欠けると失敗側にしかフィードバックがなく
+        // 「送信できたか分からない」体感に戻る。
+        let args = script_args_fixture();
+        assert!(
+            args.iter().any(|s| s.contains("display notification")
+                && s.contains("送信しました")
+                && s.contains("with title \"agent-history-pick\"")),
+            "送信成功通知行が見つからない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn paste_sent_notification_is_inside_try_after_keystroke() {
+        // 送信成功通知は try ブロック内・keystroke の直後・on error の前に
+        // なければならない。前に置くと TCC 拒否時にも「送信した」と誤報し、
+        // Accessibility 通知と矛盾する通知が 2 本出てしまう。
+        let args = script_args_fixture();
+        let try_pos = args.iter().position(|s| s == "try");
+        let keystroke_pos = args
+            .iter()
+            .position(|s| s.contains("keystroke \"r\" using command down"));
+        let sent_notification_pos = args
+            .iter()
+            .position(|s| s.contains("display notification") && s.contains("送信しました"));
+        let on_error_pos = args.iter().position(|s| s.starts_with("on error"));
+
+        assert!(try_pos.is_some(), "`try` 行が見つからない");
+        assert!(keystroke_pos.is_some(), "`keystroke` 行が見つからない");
+        assert!(
+            sent_notification_pos.is_some(),
+            "送信成功通知行が見つからない"
+        );
+        assert!(on_error_pos.is_some(), "`on error` 行が見つからない");
+
+        assert!(
+            try_pos.unwrap() < keystroke_pos.unwrap(),
+            "`try` が `keystroke` より後にある"
+        );
+        assert!(
+            keystroke_pos.unwrap() < sent_notification_pos.unwrap(),
+            "送信成功通知が `keystroke` より前にある"
+        );
+        assert!(
+            sent_notification_pos.unwrap() < on_error_pos.unwrap(),
+            "送信成功通知が `on error` より後にある"
+        );
+    }
+
+    #[test]
+    fn script_args_count_is_26() {
         let args = script_args_fixture();
         assert_eq!(
             args.len(),
-            25,
+            26,
             "スクリプト行数が想定と異なる: {}",
             args.len()
         );
