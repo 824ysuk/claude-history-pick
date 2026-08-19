@@ -42,6 +42,18 @@
 //! 存在しないため）。この限界の中でも、gotFocus=false・Accessibility 拒否時の
 //! 通知（失敗側）と対称に、keystroke 送信に成功した旨も通知する。文言は
 //! 「送信した」に留め「貼り付けた」と断定しない。
+//!
+//! ## 自動 Enter 送信（opt-in）
+//!
+//! 貼り付け（cmd-r）だけでは Enter が送られない。これは「テンプレートを貼り付けて
+//! 番号や引数の一部だけ編集してから送信する」という利用方法を壊さないための
+//! 意図的な設計であり、デフォルトの挙動として維持する。
+//! 貼り付けた内容をそのまま送信したい利用者向けに、`auto_enter` が真のときだけ
+//! cmd-r 送信直後に Return キー（`key code 36`）を追加送信する。`keystroke return`
+//! ではなく key code を使うのは、System Events の keystroke がリモート実行環境等で
+//! 通らない事例が報告されており key code のほうが堅牢とされているため。
+//! Enter 送信は cmd-r と同じ `try` ブロック内に置き、Accessibility 拒否時に
+//! 「Enter も送信した」と誤報しないようにする。
 
 use crate::secure_log;
 use crate::tmp_paths::uid_scoped_tmp_path;
@@ -74,9 +86,17 @@ fn open_stderr_log(path: &Path) -> Stdio {
 /// ポーリング設計: 40 回 × 0.05s = 最大 2s で Zed フォーカス取得を確認する。
 /// フォーカス確定後 0.3s 安定待ちで keystroke を送る（Zed 入力受付前の race 防止）。
 /// これらの値は Zed 実機動作から導いた設計値（環境依存でなく設計上の余裕値）。
-fn build_script_args(initial_delay: Duration) -> Vec<String> {
+///
+/// `auto_enter` が真のとき、cmd-r 送信直後に Return キーを追加送信する
+/// （opt-in の自動送信、モジュール doc コメント「自動 Enter 送信」参照）。
+fn build_script_args(initial_delay: Duration, auto_enter: bool) -> Vec<String> {
     let delay_secs = initial_delay.as_secs_f64();
-    vec![
+    let sent_notification = if auto_enter {
+        "display notification \"Zed に貼り付け（cmd-r）と Enter を送信しました。反映されていない場合は cmd-v で貼り付けて Enter を押してください。\" with title \"agent-history-pick\"".to_string()
+    } else {
+        "display notification \"Zed に貼り付け（cmd-r）を送信しました。入力欄に反映されていない場合は cmd-v で貼り付けてください。\" with title \"agent-history-pick\"".to_string()
+    };
+    let mut args = vec![
         format!("delay {delay_secs:.3}"),
         "tell application \"Zed\" to activate".to_string(),
         // Zed が実際に前面に来るまでポーリング（最大 2 秒 = 0.05s × 40）
@@ -98,15 +118,20 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
         "try".to_string(),
         "tell application \"System Events\"".to_string(),
         "keystroke \"r\" using command down".to_string(),
-        "end tell".to_string(),
-        "display notification \"Zed に貼り付け（cmd-r）を送信しました。入力欄に反映されていない場合は cmd-v で貼り付けてください。\" with title \"agent-history-pick\"".to_string(),
-        "on error errMsg number errNum".to_string(),
-        "display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"agent-history-pick ⚠ Accessibility 権限\"".to_string(),
-        "end try".to_string(),
-        "else".to_string(),
-        "display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"agent-history-pick ⚠\"".to_string(),
-        "end if".to_string(),
-    ]
+    ];
+    if auto_enter {
+        args.push("delay 0.3".to_string());
+        args.push("key code 36".to_string());
+    }
+    args.push("end tell".to_string());
+    args.push(sent_notification);
+    args.push("on error errMsg number errNum".to_string());
+    args.push("display notification \"システム設定 → プライバシーとセキュリティ → アクセシビリティ でターミナル/Zed を許可してください。クリップボードへのコピーは成功しています。\" with title \"agent-history-pick ⚠ Accessibility 権限\"".to_string());
+    args.push("end try".to_string());
+    args.push("else".to_string());
+    args.push("display notification \"Zed がフォーカスを取り戻せませんでした。クリップボードに内容はコピー済みです。手動で cmd-r を押してください。\" with title \"agent-history-pick ⚠\"".to_string());
+    args.push("end if".to_string());
+    args
 }
 
 /// osascript を新しいセッションで起動し、Zed がフォーカスを取り戻した後に cmd-r を送る。
@@ -119,16 +144,25 @@ fn build_script_args(initial_delay: Duration) -> Vec<String> {
 /// `Err` を返す。setsid() 失敗時は SIGTERM 保護が成立せず Zed のターミナル終了で
 /// osascript が一緒に殺されて貼り付けが黙って失敗するため、サイレント化させず
 /// 呼び出し側で fallback メッセージを出させる。
-pub fn inject_keystroke_after_delay(initial_delay: Duration) -> std::io::Result<()> {
-    spawn_injector_with_program("osascript", initial_delay)
+///
+/// `auto_enter` は opt-in の自動 Enter 送信（モジュール doc コメント参照）。
+pub fn inject_keystroke_after_delay(
+    initial_delay: Duration,
+    auto_enter: bool,
+) -> std::io::Result<()> {
+    spawn_injector_with_program("osascript", initial_delay, auto_enter)
 }
 
 /// `inject_keystroke_after_delay` の本体。program を差し替えられるよう分離している
 /// のは、setsid + spawn の Result 経路を `osascript` (実機 Zed 必要) に依存せず
 /// テストするため (`/usr/bin/true` 等で正常パスを確認する)。
-fn spawn_injector_with_program(program: &str, initial_delay: Duration) -> std::io::Result<()> {
+fn spawn_injector_with_program(
+    program: &str,
+    initial_delay: Duration,
+    auto_enter: bool,
+) -> std::io::Result<()> {
     let mut cmd = Command::new(program);
-    for line in build_script_args(initial_delay) {
+    for line in build_script_args(initial_delay, auto_enter) {
         cmd.arg("-e").arg(line);
     }
 
@@ -166,20 +200,25 @@ mod tests {
 
     /// `initial_delay` の具体値がテスト結果に影響しないケース向けの共通呼び出し
     /// （delay 値そのものを検証する `delay_value_is_embedded_correctly` /
-    /// `delay_zero_is_formatted` を除く全テストで使う）。
+    /// `delay_zero_is_formatted` を除く全テストで使う）。`auto_enter` は無効固定。
     fn script_args_fixture() -> Vec<String> {
-        build_script_args(Duration::from_millis(100))
+        build_script_args(Duration::from_millis(100), false)
+    }
+
+    /// `auto_enter` 有効固定の fixture。opt-in の自動 Enter 送信を検証するテストで使う。
+    fn script_args_fixture_with_auto_enter() -> Vec<String> {
+        build_script_args(Duration::from_millis(100), true)
     }
 
     #[test]
     fn delay_value_is_embedded_correctly() {
-        let args = build_script_args(Duration::from_millis(100));
+        let args = build_script_args(Duration::from_millis(100), false);
         assert_eq!(args[0], "delay 0.100");
     }
 
     #[test]
     fn delay_zero_is_formatted() {
-        let args = build_script_args(Duration::ZERO);
+        let args = build_script_args(Duration::ZERO, false);
         assert_eq!(args[0], "delay 0.000");
     }
 
@@ -299,13 +338,108 @@ mod tests {
     }
 
     #[test]
-    fn script_args_count_is_26() {
+    fn script_args_count_without_auto_enter_is_26() {
         let args = script_args_fixture();
         assert_eq!(
             args.len(),
             26,
             "スクリプト行数が想定と異なる: {}",
             args.len()
+        );
+    }
+
+    #[test]
+    fn script_args_count_with_auto_enter_is_28() {
+        // auto_enter 有効時は `delay 0.3` + `key code 36` の 2 行が追加される。
+        let args = script_args_fixture_with_auto_enter();
+        assert_eq!(
+            args.len(),
+            28,
+            "auto_enter 有効時のスクリプト行数が想定と異なる: {}",
+            args.len()
+        );
+    }
+
+    #[test]
+    fn auto_enter_disabled_has_no_return_key_code() {
+        // デフォルト動作の保護。auto_enter=false では Return 送信行が絶対に
+        // 生成されてはならない（テンプレート編集ワークフローを壊さないため）。
+        let args = script_args_fixture();
+        assert!(
+            !args.iter().any(|s| s == "key code 36"),
+            "auto_enter 無効時に key code 36 行が存在する: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auto_enter_appends_return_key_code_after_paste() {
+        // 順序: `keystroke "r"` < `key code 36` < 送信成功通知 < `on error`。
+        let args = script_args_fixture_with_auto_enter();
+        let keystroke_pos = args
+            .iter()
+            .position(|s| s.contains("keystroke \"r\" using command down"));
+        let key_code_pos = args.iter().position(|s| s == "key code 36");
+        let sent_notification_pos = args
+            .iter()
+            .position(|s| s.contains("display notification") && s.contains("送信しました"));
+        let on_error_pos = args.iter().position(|s| s.starts_with("on error"));
+
+        assert!(keystroke_pos.is_some(), "`keystroke` 行が見つからない");
+        assert!(key_code_pos.is_some(), "`key code 36` 行が見つからない");
+        assert!(
+            sent_notification_pos.is_some(),
+            "送信成功通知行が見つからない"
+        );
+        assert!(on_error_pos.is_some(), "`on error` 行が見つからない");
+
+        assert!(
+            keystroke_pos.unwrap() < key_code_pos.unwrap(),
+            "`key code 36` が `keystroke` より前にある"
+        );
+        assert!(
+            key_code_pos.unwrap() < sent_notification_pos.unwrap(),
+            "送信成功通知が `key code 36` より前にある"
+        );
+        assert!(
+            sent_notification_pos.unwrap() < on_error_pos.unwrap(),
+            "送信成功通知が `on error` より後にある"
+        );
+    }
+
+    #[test]
+    fn auto_enter_return_key_code_is_preceded_by_settle_delay() {
+        // `key code 36` の直前要素が settle 用の `delay 0.3` であることを位置で検証する。
+        let args = script_args_fixture_with_auto_enter();
+        let key_code_pos = args
+            .iter()
+            .position(|s| s == "key code 36")
+            .expect("`key code 36` 行が見つからない");
+        assert!(key_code_pos > 0, "`key code 36` が先頭にある");
+        assert_eq!(
+            args[key_code_pos - 1],
+            "delay 0.3",
+            "`key code 36` の直前が settle delay ではない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn auto_enter_notification_mentions_enter() {
+        let args = script_args_fixture_with_auto_enter();
+        assert!(
+            args.iter()
+                .any(|s| s.contains("display notification") && s.contains("Enter を送信しました")),
+            "auto_enter 有効時の通知文言に Enter への言及がない: {args:?}"
+        );
+    }
+
+    #[test]
+    fn default_notification_does_not_mention_enter() {
+        let args = script_args_fixture();
+        assert!(
+            !args
+                .iter()
+                .any(|s| s.contains("display notification") && s.contains("Enter")),
+            "auto_enter 無効時の通知文言に Enter への言及がある: {args:?}"
         );
     }
 
@@ -349,7 +483,7 @@ mod tests {
         // 副作用なく setsid + pre_exec + spawn の Result 経路を通せる。
         // この test が落ちる = inject_keystroke_after_delay の Err 化リファクタが
         // 通常呼び出しを壊した、と一発で分かる。
-        let result = spawn_injector_with_program("/usr/bin/true", Duration::from_millis(0));
+        let result = spawn_injector_with_program("/usr/bin/true", Duration::from_millis(0), false);
         assert!(result.is_ok(), "正常パスが Err を返した: {result:?}");
     }
 
@@ -360,6 +494,7 @@ mod tests {
         let result = spawn_injector_with_program(
             "/nonexistent/binary/agent-history-pick-test",
             Duration::from_millis(0),
+            false,
         );
         assert!(result.is_err(), "存在しない binary でも Ok を返した");
     }

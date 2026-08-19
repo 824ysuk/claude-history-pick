@@ -146,6 +146,23 @@ fn resolve_codex_history_path() -> (PathBuf, PathOrigin) {
     )
 }
 
+/// 貼り付け後の自動 Enter 送信を有効化するかどうかを `AGENT_HISTORY_PICK_AUTO_ENTER`
+/// から解決する。デフォルト（未設定・空・認識できない値）は無効。
+///
+/// 「テンプレートを貼り付けて番号や引数だけ編集してから送信する」という既存の
+/// 利用方法を壊さないため、opt-in の判定は明示的に認識した値のときのみ真とし、
+/// それ以外はすべて無効側に倒す（`EnvPathSource::DirJoinFile` が空値を未設定
+/// 扱いにする既存慣習 - main.rs:105-113 付近 - と同じ「不明な入力は安全側」の方針）。
+fn resolve_auto_enter() -> bool {
+    match std::env::var("AGENT_HISTORY_PICK_AUTO_ENTER") {
+        Ok(v) => matches!(
+            v.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
+        Err(_) => false,
+    }
+}
+
 /// 1 ソース分の履歴を読み込む。エラー時は理由を stderr に出しつつ常に空
 /// `Vec` を返して継続する（他ソースの読み込み結果を道連れにしない）。
 ///
@@ -258,7 +275,7 @@ fn main() {
     // injector が fork するため、ロックは fork 前に解放する。
     // daemon は main process 終了後も動くが、次の ctrl-; r を妨げない。
     guard::release();
-    if let Err(e) = injector::inject_keystroke_after_delay(PASTE_DELAY) {
+    if let Err(e) = injector::inject_keystroke_after_delay(PASTE_DELAY, resolve_auto_enter()) {
         // setsid() / spawn() 失敗時。クリップボードへのコピーは成功しているため、
         // 「自動貼り付けが効かなかったが内容はコピー済み」であることを伝達する。
         eprintln!("osascript の起動に失敗しました: {e}");
@@ -576,5 +593,39 @@ mod tests {
                 Err(io::Error::other("simulated EIO"))
             });
         assert!(claude_had_error && codex_had_error);
+    }
+
+    fn clear_auto_enter_env_var() {
+        std::env::remove_var("AGENT_HISTORY_PICK_AUTO_ENTER");
+    }
+
+    #[test]
+    fn auto_enter_unset_returns_false() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        clear_auto_enter_env_var();
+        assert!(!resolve_auto_enter());
+    }
+
+    #[test]
+    fn auto_enter_recognized_true_values_return_true() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for value in ["1", "true", "TRUE", "yes", "on", "  1  "] {
+            std::env::set_var("AGENT_HISTORY_PICK_AUTO_ENTER", value);
+            assert!(resolve_auto_enter(), "{value:?} は有効値として扱われるべき");
+        }
+        clear_auto_enter_env_var();
+    }
+
+    #[test]
+    fn auto_enter_unrecognized_values_return_false() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        for value in ["", "   ", "0", "false", "maybe"] {
+            std::env::set_var("AGENT_HISTORY_PICK_AUTO_ENTER", value);
+            assert!(
+                !resolve_auto_enter(),
+                "{value:?} は無効値として扱われるべき"
+            );
+        }
+        clear_auto_enter_env_var();
     }
 }

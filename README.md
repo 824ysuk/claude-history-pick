@@ -21,6 +21,7 @@ ctrl-; r
   → setsid で独立プロセス（osascript）を起動
   → Zed がフォーカスを取り戻すまでポーリング（最大 2 秒）
   → cmd-r を送信 → terminal::Paste でクリップボードの内容を貼り付け
+  → （AGENT_HISTORY_PICK_AUTO_ENTER 有効時のみ）Enter も送信
 ```
 
 ## 履歴の表示仕様
@@ -96,6 +97,9 @@ cargo build --release
 | `CLAUDE_HISTORY_PATH` | `~/.claude/history.jsonl` | Claude Code 履歴ファイルのパス |
 | `CODEX_HISTORY_PATH` | (未設定) | Codex CLI 履歴ファイルのパス（`CODEX_HOME` より優先） |
 | `CODEX_HOME` | `~/.codex` | Codex CLI 自身のホームディレクトリ。`$CODEX_HOME/history.jsonl` を履歴として読む |
+| `AGENT_HISTORY_PICK_AUTO_ENTER` | (未設定 = 無効) | 貼り付け（cmd-r）後に自動で Enter まで送信するかどうか。有効値: `1` / `true` / `yes` / `on`（大文字小文字・前後空白は無視）。それ以外の値は無効として扱う |
+
+デフォルトで `AGENT_HISTORY_PICK_AUTO_ENTER` は無効。テンプレートを貼り付けて番号や引数の一部だけ編集してから送信する、という利用方法を壊さないため。
 
 ```bash
 # 例: 別パスを使う
@@ -116,6 +120,21 @@ CLAUDE_HISTORY_PATH=/path/to/history.jsonl agent-history-pick
     "use_new_terminal": true,
     "reveal": "always",
     "hide": "on_success"
+  }
+]
+```
+
+`ctrl-; r` の実経路ではこのタスクが本バイナリを起動するため、`AGENT_HISTORY_PICK_AUTO_ENTER` を常用したい場合はタスク側の `env` に指定する（対話シェルの環境変数はこのタスク実行には引き継がれない）。
+
+```json
+[
+  {
+    "label": "Agent History Search",
+    "command": "~/.local/bin/agent-history-pick",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "hide": "on_success",
+    "env": { "AGENT_HISTORY_PICK_AUTO_ENTER": "1" }
   }
 ]
 ```
