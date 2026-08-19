@@ -11,11 +11,51 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// history.jsonl の pastedContents エントリ 1 件。
+///
+/// ペースト本文の格納形式は 2 種類あり、値オブジェクトごとに排他的に現れる。
+/// 本文をインラインに埋め込む `content` 形式と、`paste-cache/{hash}.txt` への
+/// 参照である `contentHash` 形式。どちらの形式で書かれるかは Claude Code 側の
+/// 裁量のため両方を Option にする。必須フィールドのままだと片方欠落側の値で
+/// デシリアライズが失敗し、`pastedContents` ごと、ひいては行全体（プロンプト）
+/// が `parse_entry` の `.ok()?` に握り潰され履歴から消える。将来別形式が
+/// 増えても両方 `None` になるだけで行は残る。
+///
+/// `type`（実データでは常に `"text"`）はあえて読まない。読んで分岐すると
+/// 未知の type で同じ失敗を繰り返す。
 #[derive(Deserialize)]
 struct PasteRef {
     id: u32,
     #[serde(rename = "contentHash")]
-    content_hash: String,
+    content_hash: Option<String>,
+    content: Option<String>,
+}
+
+impl PasteRef {
+    /// このペースト参照の本文を解決する。解決できない場合は `None`。
+    ///
+    /// インライン `content` を優先する。ファイルシステムに依存せず失敗経路を
+    /// 持たないため、`contentHash` のキャッシュファイルが削除済みでも本文を
+    /// 失わない。`cache_dir` が `None` のときは `contentHash` 経由の解決のみ
+    /// 不能になる（インライン形式はファイルアクセスを要さないため影響しない）。
+    ///
+    /// 末尾改行は両形式とも落とす。プレースホルダは文中に現れることが多く
+    /// 改行を残すと文が分断され、文末にある場合はターミナルへの貼り付け時に
+    /// 意図しない送信を招く。形式間で正規化を揃えることで、同じペーストが
+    /// 記録形式によって異なるクリップボード内容にならないことも保証する。
+    fn resolve(&self, cache_dir: Option<&Path>) -> Option<String> {
+        if let Some(content) = &self.content {
+            return Some(content.trim_end_matches('\n').to_string());
+        }
+        let hash = self.content_hash.as_deref()?;
+        let cache_dir = cache_dir?;
+        // hash はファイル名に連結する。空文字は `.txt` の意図しない読み出し、
+        // 非 hex 値はパストラバーサルの経路になり得るためスキップ。
+        if hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let raw = std::fs::read_to_string(cache_dir.join(format!("{hash}.txt"))).ok()?;
+        Some(raw.trim_end_matches('\n').to_string())
+    }
 }
 
 /// history.jsonl の 1 行に対応する構造体。
@@ -58,42 +98,47 @@ pub fn load_claude_prompts(history_path: &Path) -> std::io::Result<Vec<Prompt>> 
     ))
 }
 
-/// `display` 内の `[Pasted text #id ...]` プレースホルダを
-/// `paste_cache_dir/{contentHash}.txt` の実ペースト内容に置換した文字列を返す。
+/// `text` 中の `[Pasted text #id ...]` プレースホルダの範囲
+/// （開始位置 〜 対応する `]` の次）を返す。見つからなければ `None`。
 ///
-/// キャッシュファイルが存在しない ID はプレースホルダのまま残す。
-/// ID を降順で処理することで先頭側の置換後に後続 ID の位置が変わっても
-/// `find` が再スキャンするため問題ない（ただし降順の方が直感的に安全）。
+/// ID の前方一致（`#1` が `#10` のプレフィックスになる）を避けるため、
+/// ID 直後が数字でないことを確認する。ID を降順処理していても、高 ID 側の
+/// 解決が失敗してプレースホルダが残った場合はこのチェックが必要になる。
+fn find_placeholder(text: &str, id: u32) -> Option<(usize, usize)> {
+    let prefix = format!("[Pasted text #{id}");
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(&prefix) {
+        let start = from + rel;
+        let after = start + prefix.len();
+        if !text[after..].starts_with(|c: char| c.is_ascii_digit()) {
+            return text[after..].find(']').map(|e| (start, after + e + 1));
+        }
+        from = after;
+    }
+    None
+}
+
+/// `display` 内の `[Pasted text #id ...]` プレースホルダを実ペースト内容に
+/// 置換した文字列を返す。
+///
+/// 解決できない ID はプレースホルダのまま残す（1 件失敗しても他の ID の
+/// 展開は続ける）。ID を降順で処理するのは `HashMap` の反復順が不定なため
+/// 結果を決定的にする目的（`find_placeholder` が前方一致を防ぐため、
+/// 置換順序自体が結果を左右することはない）。
 fn expand_pasted_contents(
     display: &str,
     pasted_contents: &HashMap<String, PasteRef>,
-    paste_cache_dir: &Path,
+    cache_dir: Option<&Path>,
 ) -> String {
     let mut result = display.to_string();
     let mut refs: Vec<&PasteRef> = pasted_contents.values().collect();
-    // 後方（高 ID）から処理: 前方置換による後続 ID のインデックスずれを回避
     refs.sort_by_key(|r| Reverse(r.id));
     for paste_ref in refs {
-        // content_hash は hex 文字列のはず。非 hex 値はパストラバーサルの経路になり得るためスキップ。
-        if !paste_ref
-            .content_hash
-            .chars()
-            .all(|c| c.is_ascii_hexdigit())
-        {
+        let Some(content) = paste_ref.resolve(cache_dir) else {
             continue;
-        }
-        let cache_path = paste_cache_dir.join(format!("{}.txt", paste_ref.content_hash));
-        let content = match std::fs::read_to_string(&cache_path) {
-            Ok(c) => c,
-            Err(_) => continue,
         };
-        let content = content.trim_end_matches('\n');
-        let prefix = format!("[Pasted text #{}", paste_ref.id);
-        if let Some(start) = result.find(&prefix) {
-            if let Some(end_offset) = result[start..].find(']') {
-                let end = start + end_offset + 1;
-                result.replace_range(start..end, content);
-            }
+        if let Some((start, end)) = find_placeholder(&result, paste_ref.id) {
+            result.replace_range(start..end, &content);
         }
     }
     result
@@ -117,7 +162,9 @@ fn parse_iso_timestamp_to_ms(iso: &str) -> Option<i64> {
 /// JSONL 1 行から `Prompt` を取り出す。
 ///
 /// 空行・JSON パース失敗・`display` 欠落・空文字列はすべて `None` を返す。
-/// `paste_cache_dir` が空文字列のとき paste 展開をスキップする（テスト用）。
+/// `paste_cache_dir` が空文字列のとき `contentHash` 経由の展開のみをスキップ
+/// する（テスト用。インライン `content` はファイルアクセスを要さないため
+/// この空文字列センチネルの影響を受けず常に展開される）。
 fn parse_entry(line: &str, paste_cache_dir: &Path) -> Option<Prompt> {
     if line.trim().is_empty() {
         return None;
@@ -139,11 +186,11 @@ fn parse_entry(line: &str, paste_cache_dir: &Path) -> Option<Prompt> {
     let iso_timestamp = entry
         .iso_timestamp
         .or_else(|| timestamp_ms.map(unix_ms_to_local_iso));
-    // paste-cache ディレクトリが指定されていてペーストコンテンツがある場合のみ展開
+    // 空パスは「ファイルアクセスなし」を表すテスト用センチネル。ここで Option
+    // に畳んでおき、expand_pasted_contents 以降はマジックな空パスを知らずに済む。
+    let cache_dir = (!paste_cache_dir.as_os_str().is_empty()).then_some(paste_cache_dir);
     let full_text = match &entry.pasted_contents {
-        Some(pasted) if !pasted.is_empty() && !paste_cache_dir.as_os_str().is_empty() => {
-            expand_pasted_contents(&display, pasted, paste_cache_dir)
-        }
+        Some(pasted) if !pasted.is_empty() => expand_pasted_contents(&display, pasted, cache_dir),
         _ => display.clone(),
     };
     Some(Prompt {
@@ -155,7 +202,9 @@ fn parse_entry(line: &str, paste_cache_dir: &Path) -> Option<Prompt> {
     })
 }
 
-/// JSONL 行イテレータからプロンプトを収集する（paste-cache 展開なし・テスト用）。
+/// JSONL 行イテレータからプロンプトを収集する（`contentHash` 経由の展開なし・
+/// テスト用）。インライン `content` はファイルアクセスを要さないため
+/// この関数でも展開される。
 #[cfg(test)]
 fn collect_prompts(lines: impl Iterator<Item = String>) -> Vec<Prompt> {
     collect_prompts_with_cache(lines, Path::new(""))
@@ -424,14 +473,24 @@ mod tests {
         assert_eq!(result, vec!["line1\nline2"]);
     }
 
-    // ─── collect_prompts は full_text == display を常に保証 ──────────────────
+    // ─── collect_prompts は contentHash 参照を展開しない ──────────────────────
 
     #[test]
-    fn collect_prompts_full_text_always_equals_display() {
-        // cache なし版では full_text は展開されず display と一致する。
+    fn collect_prompts_does_not_expand_content_hash_reference() {
+        // collect_prompts はファイルアクセスなし版。contentHash 参照はキャッシュ
+        // ファイルを読めないため展開されず display のまま残る。
         let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
         let result = collect_prompts(lines(input));
         assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    #[test]
+    fn collect_prompts_expands_inline_content_even_without_cache_dir() {
+        // インライン content はファイルアクセスを要さないため、cache なし版
+        // (collect_prompts) でも展開される。本 Issue の主回帰テスト。
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","content":"ACTUAL"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, "before ACTUAL after");
     }
 
     // ─── 複数のペースト参照 ────────────────────────────────────────────────────
@@ -462,6 +521,96 @@ mod tests {
         );
     }
 
+    // ─── インライン content 形式（Issue #77 回帰） ────────────────────────────
+    // 実 history.jsonl の pastedContents には、本文を直接埋め込む形式
+    // {"content":"..."} と paste-cache を参照する形式 {"contentHash":"..."} が
+    // 混在する。contentHash を必須フィールドにしていた旧実装では、インライン
+    // 形式の値 1 つでも含む行が丸ごとデシリアライズに失敗し、プロンプト全体が
+    // 履歴から消えていた。
+
+    #[test]
+    fn inline_content_entry_is_not_dropped() {
+        // 最重要回帰テスト: インライン形式の行がパース失敗で捨てられず
+        // Prompt として残ること自体を、展開結果とは独立に確認する。
+        let input = r#"{"display":"[Pasted text #1 +1 lines]","pastedContents":{"1":{"id":1,"type":"text","content":"本文"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result.len(), 1, "インライン形式の行が消えてはならない");
+    }
+
+    #[test]
+    fn inline_content_is_expanded_in_full_text() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","content":"actual content"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(prompts[0].full_text, "before actual content after");
+        assert_eq!(
+            prompts[0].display, "before [Pasted text #1 +1 lines] after",
+            "display はプレースホルダのまま保持する"
+        );
+    }
+
+    #[test]
+    fn mixed_inline_and_content_hash_refs_in_one_entry_are_both_expanded() {
+        // 実データで 26 件確認された「1 エントリ内で 2 形式が混在する」ケース。
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("deadbeef00000002.txt"), "FROM_CACHE").unwrap();
+        let input = r#"{"display":"a [Pasted text #1 +0 lines] b [Pasted text #2 +0 lines] c","pastedContents":{"1":{"id":1,"type":"text","content":"FROM_INLINE"},"2":{"id":2,"type":"text","contentHash":"deadbeef00000002"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(prompts[0].full_text, "a FROM_INLINE b FROM_CACHE c");
+    }
+
+    #[test]
+    fn inline_content_trailing_newline_is_trimmed() {
+        // contentHash 形式と同様、末尾改行はプレースホルダの前後にある文を
+        // 分断しないよう除去する。
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text","content":"line1\nline2\n"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, "before line1\nline2 after");
+    }
+
+    #[test]
+    fn paste_ref_without_content_or_hash_keeps_placeholder() {
+        // 将来 Claude Code が第 3 の形式を書いても、content・contentHash が
+        // 両方 None になるだけでエントリ自体は残り、プレースホルダは維持される。
+        let input = r#"{"display":"before [Pasted text #1 +1 lines] after","pastedContents":{"1":{"id":1,"type":"text"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result.len(), 1, "行が消えてはならない");
+        assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    #[test]
+    fn inline_content_without_placeholder_in_display_is_preserved() {
+        // 実データで 102 件確認された「貼り付け後にプレースホルダを消して
+        // 送信した」ケース。展開対象がなくても full_text は display のまま。
+        let input = r#"{"display":"通常の文章です","pastedContents":{"1":{"id":1,"type":"text","content":"未使用の貼り付け"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(result[0].full_text, "通常の文章です");
+    }
+
+    #[test]
+    fn inline_content_takes_priority_over_content_hash() {
+        // 実データでは 2 フィールド同時出現は観測されないが、将来同時に現れた
+        // 場合もファイル IO を要さない content を優先する（安全側）。
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("deadbeef00000001.txt"), "FROM_CACHE").unwrap();
+        let input = r#"{"display":"[Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","content":"FROM_INLINE","contentHash":"deadbeef00000001"}}}"#;
+        let prompts = collect_prompts_with_cache(std::iter::once(input.to_string()), dir.path());
+        assert_eq!(prompts[0].full_text, "FROM_INLINE");
+    }
+
+    #[test]
+    fn paste_id_1_does_not_match_placeholder_10() {
+        // #1 の解決が #10 のプレースホルダに前方一致して誤爆しないこと。
+        // #10 側は解決不能（content・contentHash なし）にしてプレースホルダを
+        // 残し、#1 の探索が #10 にマッチしない状態を再現する。
+        let input = r#"{"display":"[Pasted text #10 +5 lines] [Pasted text #1 +0 lines]","pastedContents":{"1":{"id":1,"type":"text","content":"ONE"},"10":{"id":10,"type":"text"}}}"#;
+        let result = collect_prompts(lines(input));
+        assert_eq!(
+            result[0].full_text, "[Pasted text #10 +5 lines] ONE",
+            "#1 の展開が #10 のプレースホルダを破壊してはならない"
+        );
+    }
+
     // ─── dedup は display キーで行い full_text は最新を保持 ──────────────────
 
     #[test]
@@ -486,15 +635,25 @@ mod tests {
         );
     }
 
-    // ─── 空の cache_dir は展開をスキップして display をそのまま使う ────────
+    // ─── 空の cache_dir は contentHash 経由の展開のみをスキップする ────────
 
     #[test]
-    fn empty_cache_dir_path_skips_expansion() {
-        // collect_prompts（cache なし版）は paste_cache_dir を Path::new("") で呼ぶ。
-        // pastedContents が存在しても展開されずに display == full_text になること。
+    fn empty_cache_dir_path_skips_content_hash_expansion() {
+        // paste_cache_dir を Path::new("") で呼ぶと contentHash 参照はファイルに
+        // アクセスできず展開されない（display == full_text のまま）。
         let input = r#"{"display":"[Pasted text #1 +2 lines]","pastedContents":{"1":{"id":1,"type":"text","contentHash":"abc"}}}"#;
         let result = collect_prompts_with_cache(std::iter::once(input.to_string()), Path::new(""));
         assert_eq!(result[0].full_text, result[0].display);
+    }
+
+    #[test]
+    fn empty_cache_dir_path_still_expands_inline_content() {
+        // インライン content はファイルアクセスを要さないため、空の
+        // paste_cache_dir（ファイルアクセス不可を表すテスト用センチネル）でも
+        // 影響を受けずに展開される。
+        let input = r#"{"display":"[Pasted text #1 +2 lines]","pastedContents":{"1":{"id":1,"type":"text","content":"ACTUAL"}}}"#;
+        let result = collect_prompts_with_cache(std::iter::once(input.to_string()), Path::new(""));
+        assert_eq!(result[0].full_text, "ACTUAL");
     }
 
     // ─── 新着優先保証 ─────────────────────────────────────────────────────────
